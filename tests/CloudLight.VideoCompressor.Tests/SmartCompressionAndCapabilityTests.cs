@@ -149,6 +149,38 @@ public sealed class SmartCompressionAndCapabilityTests
         Assert.Equal([VideoEncoder.HevcQsv, VideoEncoder.Libx265], fallback.FallbackEncoders);
     }
 
+    [Theory]
+    [InlineData(VideoCodecKind.H264, EncoderSelectionMode.NvidiaNvenc, VideoEncoder.H264Nvenc, VideoEncoder.Libx264)]
+    [InlineData(VideoCodecKind.H265, EncoderSelectionMode.NvidiaNvenc, VideoEncoder.HevcNvenc, VideoEncoder.Libx265)]
+    [InlineData(VideoCodecKind.H264, EncoderSelectionMode.IntelQsv, VideoEncoder.H264Qsv, VideoEncoder.Libx264)]
+    [InlineData(VideoCodecKind.H265, EncoderSelectionMode.IntelQsv, VideoEncoder.HevcQsv, VideoEncoder.Libx265)]
+    [InlineData(VideoCodecKind.H264, EncoderSelectionMode.AmdAmf, VideoEncoder.H264Amf, VideoEncoder.Libx264)]
+    [InlineData(VideoCodecKind.H265, EncoderSelectionMode.AmdAmf, VideoEncoder.HevcAmf, VideoEncoder.Libx265)]
+    public void UnavailableHardware_FallsBackToSoftwareWithoutChangingTargetCodec(
+        VideoCodecKind targetCodec,
+        EncoderSelectionMode selectionMode,
+        VideoEncoder unavailableHardware,
+        VideoEncoder expectedSoftwareEncoder)
+    {
+        var settings = new AppSettings
+        {
+            CompressionMode = CompressionMode.Crf,
+            TargetVideoCodec = targetCodec,
+            EncoderSelection = selectionMode,
+            VideoEncoder = unavailableHardware
+        };
+
+        var plan = new CompressionPlanner().CreatePlan(
+            Media(videoCodec: targetCodec == VideoCodecKind.H264 ? "h264" : "hevc"),
+            settings,
+            capabilities: EncoderCapabilitySet.SoftwareDefaults);
+
+        Assert.Equal(expectedSoftwareEncoder, plan.Encoder);
+        Assert.Equal(targetCodec, plan.TargetCodec);
+        Assert.Equal(targetCodec, plan.EffectiveTargetCodec);
+        Assert.Equal(targetCodec, EncoderCatalog.Get(plan.Encoder).Codec);
+    }
+
     [Fact]
     public void EncoderArgumentBuilders_UseEncoderSpecificQualityControls()
     {

@@ -1,4 +1,5 @@
 using CloudLight.VideoCompressor.Models;
+using CloudLight.VideoCompressor.Infrastructure;
 
 namespace CloudLight.VideoCompressor.Services;
 
@@ -24,6 +25,14 @@ public sealed class SafeFileService
     }
 
     public async Task<OutputValidationResult> ValidateOutputAsync(FFmpegTools tools, VideoFileInfo source, string temporaryPath, CancellationToken cancellationToken)
+        => await ValidateOutputAsync(tools, source, temporaryPath, plan: null, cancellationToken).ConfigureAwait(false);
+
+    public async Task<OutputValidationResult> ValidateOutputAsync(
+        FFmpegTools tools,
+        VideoFileInfo source,
+        string temporaryPath,
+        CompressionPlan? plan,
+        CancellationToken cancellationToken)
     {
         if (!File.Exists(temporaryPath))
         {
@@ -42,6 +51,48 @@ public sealed class SafeFileService
             if (string.IsNullOrWhiteSpace(output.VideoCodec))
             {
                 return new OutputValidationResult(false, "输出文件中未检测到视频流。", output);
+            }
+
+            if (plan is not null)
+            {
+                var outputCodec = NormalizeCodec(output.VideoCodec);
+                if (outputCodec is null || outputCodec != plan.EffectiveTargetCodec)
+                {
+                    return new OutputValidationResult(
+                        false,
+                        $"输出视频编码为 {output.VideoCodec ?? "未知"}，与计划的 {plan.EffectiveTargetCodec.GetDescription()} 不符。",
+                        output);
+                }
+
+                if (plan.InputInfo?.Width is { } sourceWidth && plan.InputInfo.Height is { } sourceHeight &&
+                    output.Width is { } outputWidth && output.Height is { } outputHeight)
+                {
+                    if (plan.ResolutionLimit is { } limit && (outputWidth > limit.Width || outputHeight > limit.Height))
+                    {
+                        return new OutputValidationResult(false, "输出分辨率超过计划上限。", output);
+                    }
+                    if (plan.ResolutionLimit is null && (outputWidth != sourceWidth || outputHeight != sourceHeight))
+                    {
+                        return new OutputValidationResult(false, "输出分辨率与计划不符。", output);
+                    }
+                }
+
+                if (plan.InputInfo?.FrameRate is > 0 && output.FrameRate is > 0)
+                {
+                    if (plan.FpsLimit is { } fpsLimit && output.FrameRate > fpsLimit + 0.5)
+                    {
+                        return new OutputValidationResult(false, "输出 FPS 超过计划上限。", output);
+                    }
+                    if (plan.FpsLimit is null && Math.Abs(output.FrameRate.Value - plan.InputInfo.FrameRate.Value) > 1.0)
+                    {
+                        return new OutputValidationResult(false, "输出 FPS 与计划不符。", output);
+                    }
+                }
+
+                if (plan.InputInfo is { HasProbeData: true } plannedSource && output.AudioTrackCount != plannedSource.AudioTrackCount)
+                {
+                    return new OutputValidationResult(false, "输出音轨数量与源文件不符。", output);
+                }
             }
 
             var sourceInfo = source.DurationSeconds is > 0 ? source : await _ffprobeService.ProbeAsync(tools, source.FullPath, cancellationToken);
@@ -67,6 +118,14 @@ public sealed class SafeFileService
             return new OutputValidationResult(false, $"无法验证输出文件：{exception.Message}", null);
         }
     }
+
+    private static VideoCodecKind? NormalizeCodec(string? codec) => codec?.Trim().ToLowerInvariant() switch
+    {
+        "h264" or "avc" => VideoCodecKind.H264,
+        "hevc" or "h265" or "x265" => VideoCodecKind.H265,
+        "av1" => VideoCodecKind.Av1,
+        _ => null
+    };
 
     public OriginalMoveResult MoveOriginal(VideoFileInfo source, string destination)
     {

@@ -95,6 +95,7 @@ public partial class MainWindow : Window
         finally
         {
             _viewModel.ApplyTaskSessionResults(e.Session);
+            _ = _viewModel.RefreshHistoryAsync();
             _compressionTaskWindow = null;
         }
     }

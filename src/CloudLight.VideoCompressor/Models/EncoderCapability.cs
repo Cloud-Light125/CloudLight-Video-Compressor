@@ -1,3 +1,5 @@
+using CloudLight.VideoCompressor.Services;
+
 namespace CloudLight.VideoCompressor.Models;
 
 public sealed record EncoderCapability(
@@ -9,7 +11,17 @@ public sealed record EncoderCapability(
     bool IsHardware,
     bool IsSupportedByFfmpeg,
     bool IsUsable,
-    string? UnavailableReason);
+    string? UnavailableReason)
+{
+    public bool ListedByFfmpeg => IsSupportedByFfmpeg;
+    public bool InitializationTestPassed { get; init; } = !IsHardware || IsUsable;
+    public bool Available => IsUsable;
+    public DateTimeOffset? LastProbeTime { get; init; }
+    public IReadOnlyList<RateControlMode> SupportedRateControls { get; init; } = Array.Empty<RateControlMode>();
+    public IReadOnlyList<string> SupportedPresets { get; init; } = Array.Empty<string>();
+    public IReadOnlyList<string> SupportedPixelFormats { get; init; } = Array.Empty<string>();
+    public int? MaxResolutionKnown { get; init; }
+}
 
 public sealed class EncoderCapabilitySet
 {
@@ -45,7 +57,7 @@ public sealed class EncoderCapabilitySet
 
     public static EncoderCapabilitySet SoftwareDefaults { get; } = new(
         EncoderCatalog.Definitions
-            .Where(definition => !definition.IsHardware)
+        .Where(definition => !definition.IsHardware)
             .Select(definition => new EncoderCapability(
                 definition.Id,
                 definition.DisplayName,
@@ -55,7 +67,14 @@ public sealed class EncoderCapabilitySet
                 false,
                 true,
                 true,
-                null)));
+                null)
+            {
+                InitializationTestPassed = true,
+                LastProbeTime = DateTimeOffset.UtcNow,
+                SupportedRateControls = EncoderStrategyCatalog.Get(definition.Encoder).SupportedRateControls,
+                SupportedPresets = EncoderStrategyCatalog.Get(definition.Encoder).SupportedPresets,
+                SupportedPixelFormats = EncoderStrategyCatalog.Get(definition.Encoder).SupportedPixelFormats
+            }));
 }
 
 public sealed record EncoderDefinition(
@@ -78,7 +97,7 @@ public static class EncoderCatalog
         new("hevc_qsv", "Intel Quick Sync · H.265", VideoEncoder.HevcQsv, VideoCodecKind.H265, EncoderVendor.Intel, true),
         new("h264_amf", "AMD AMF · H.264", VideoEncoder.H264Amf, VideoCodecKind.H264, EncoderVendor.Amd, true),
         new("hevc_amf", "AMD AMF · H.265", VideoEncoder.HevcAmf, VideoCodecKind.H265, EncoderVendor.Amd, true),
-        new("libsvtav1", "CPU 软件编码 · AV1", VideoEncoder.LibsvtAv1, VideoCodecKind.H265, EncoderVendor.Cpu, false)
+        new("libsvtav1", "CPU 软件编码 · AV1", VideoEncoder.LibsvtAv1, VideoCodecKind.Av1, EncoderVendor.Cpu, false)
     ];
 
     public static EncoderDefinition Get(VideoEncoder encoder) =>

@@ -44,11 +44,16 @@ public sealed class AppSettings : ObservableObject
     private string _originalSuffix = string.Empty;
     private bool _discardIfLarger = true;
     private SmartCompressionPreset _smartPreset = SmartCompressionPreset.Balanced;
+    private CompressionProfile _compressionProfile = CompressionProfile.Balanced;
     private double _remotePlaybackBandwidthMbps = 12;
     private double _remotePlaybackSafetyRatio = 0.70;
     private double _smartMaximumVideoBitrateMbps;
     private double _smartMinimumExpectedSavingRatio = 0.08;
     private double _smartQualityFactor = 1.0;
+    private bool _enableAdvancedQualityCalibration;
+    private double _vmafTarget = 95;
+    private int _qualityCalibrationSampleSeconds = 8;
+    private int _qualityCalibrationCandidateCount = 3;
 
     public string LastDirectory { get => _lastDirectory; set => SetProperty(ref _lastDirectory, value); }
     public string FFmpegDirectory { get => _ffmpegDirectory; set => SetProperty(ref _ffmpegDirectory, value); }
@@ -158,7 +163,43 @@ public sealed class AppSettings : ObservableObject
     public string OriginalPrefix { get => _originalPrefix; set => SetProperty(ref _originalPrefix, value); }
     public string OriginalSuffix { get => _originalSuffix; set => SetProperty(ref _originalSuffix, value); }
     public bool DiscardIfLarger { get => _discardIfLarger; set => SetProperty(ref _discardIfLarger, value); }
-    public SmartCompressionPreset SmartPreset { get => _smartPreset; set => SetProperty(ref _smartPreset, value); }
+    public SmartCompressionPreset SmartPreset
+    {
+        get => _smartPreset;
+        set
+        {
+            if (SetProperty(ref _smartPreset, value))
+            {
+                var profile = CompressionProfileCatalog.FromLegacy(value);
+                if (_compressionProfile != profile)
+                {
+                    _compressionProfile = profile;
+                    OnPropertyChanged(nameof(CompressionProfile));
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// New profile name. SmartPreset remains serialized and synchronized for
+    /// compatibility with settings.json files from 1.1.0 and earlier.
+    /// </summary>
+    public CompressionProfile CompressionProfile
+    {
+        get => _compressionProfile;
+        set
+        {
+            if (SetProperty(ref _compressionProfile, value))
+            {
+                var legacy = CompressionProfileCatalog.ToLegacy(value);
+                if (_smartPreset != legacy)
+                {
+                    _smartPreset = legacy;
+                    OnPropertyChanged(nameof(SmartPreset));
+                }
+            }
+        }
+    }
     public double RemotePlaybackBandwidthMbps
     {
         get => _remotePlaybackBandwidthMbps;
@@ -188,6 +229,35 @@ public sealed class AppSettings : ObservableObject
     {
         get => _smartQualityFactor;
         set => SetProperty(ref _smartQualityFactor, Math.Clamp(value, 0.5, 1.5));
+    }
+
+    /// <summary>
+    /// Optional and intentionally disabled by default. When enabled, planning
+    /// may run bounded representative-sample quality calibration if libvmaf is
+    /// available in the selected FFmpeg build.
+    /// </summary>
+    public bool EnableAdvancedQualityCalibration
+    {
+        get => _enableAdvancedQualityCalibration;
+        set => SetProperty(ref _enableAdvancedQualityCalibration, value);
+    }
+
+    public double VmafTarget
+    {
+        get => _vmafTarget;
+        set => SetProperty(ref _vmafTarget, Math.Clamp(value, 70, 99.9));
+    }
+
+    public int QualityCalibrationSampleSeconds
+    {
+        get => _qualityCalibrationSampleSeconds;
+        set => SetProperty(ref _qualityCalibrationSampleSeconds, Math.Clamp(value, 5, 15));
+    }
+
+    public int QualityCalibrationCandidateCount
+    {
+        get => _qualityCalibrationCandidateCount;
+        set => SetProperty(ref _qualityCalibrationCandidateCount, Math.Clamp(value, 3, 5));
     }
 
     public ObservableCollection<CompressionRule> Rules { get; set; } = [];
@@ -231,6 +301,7 @@ public sealed class AppSettings : ObservableObject
     private static VideoCodecKind LegacyCodec(VideoEncoder encoder) => encoder switch
     {
         VideoEncoder.Libx264 or VideoEncoder.H264Nvenc or VideoEncoder.H264Qsv or VideoEncoder.H264Amf => VideoCodecKind.H264,
+        VideoEncoder.LibsvtAv1 => VideoCodecKind.Av1,
         _ => VideoCodecKind.H265
     };
 

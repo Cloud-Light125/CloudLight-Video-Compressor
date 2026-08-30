@@ -34,8 +34,12 @@ public sealed class SettingsService
 
         try
         {
-            await using var stream = File.OpenRead(_settingsPath);
-            return await JsonSerializer.DeserializeAsync(stream, SettingsJsonContext.Default.AppSettings, cancellationToken) ?? new AppSettings();
+            var json = await File.ReadAllTextAsync(_settingsPath, cancellationToken);
+            using var document = JsonDocument.Parse(json);
+            var settings = JsonSerializer.Deserialize(json, SettingsJsonContext.Default.AppSettings);
+            var hasExplicitProfile = document.RootElement.ValueKind == JsonValueKind.Object &&
+                document.RootElement.TryGetProperty(nameof(AppSettings.CompressionProfile), out _);
+            return SettingsMigration.Normalize(settings, hasExplicitProfile);
         }
         catch (Exception exception) when (exception is JsonException or IOException or UnauthorizedAccessException)
         {
@@ -45,15 +49,26 @@ public sealed class SettingsService
 
     public async Task SaveAsync(AppSettings settings, CancellationToken cancellationToken = default)
     {
+        settings = SettingsMigration.Normalize(settings);
         var directory = Path.GetDirectoryName(_settingsPath)!;
         Directory.CreateDirectory(directory);
         var temporaryPath = _settingsPath + ".tmp";
-        await using (var stream = File.Create(temporaryPath))
+        try
         {
-            await JsonSerializer.SerializeAsync(stream, settings, SettingsJsonContext.Default.AppSettings, cancellationToken);
-        }
+            await using (var stream = File.Create(temporaryPath))
+            {
+                await JsonSerializer.SerializeAsync(stream, settings, SettingsJsonContext.Default.AppSettings, cancellationToken);
+            }
 
-        File.Move(temporaryPath, _settingsPath, true);
+            File.Move(temporaryPath, _settingsPath, true);
+        }
+        finally
+        {
+            if (File.Exists(temporaryPath))
+            {
+                File.Delete(temporaryPath);
+            }
+        }
     }
 
     private void MigrateLegacySettingsIfNeeded()

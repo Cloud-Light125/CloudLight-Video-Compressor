@@ -69,16 +69,33 @@ public sealed class CompressionWorkflowService
         string? scanRoot,
         IProgress<WorkflowProgress>? progress,
         CancellationToken cancellationToken)
-        => ProcessFileCoreAsync(
-            source,
-            settings,
+        => ProcessJobAsync(
+            CompressionJob.Create(source, settings, condition, scanRoot).WithPlan(plan),
             tools,
-            scanRoot,
             progress,
-            cancellationToken,
-            capabilities: null,
-            plannedPlan: plan,
-            plannedCondition: condition);
+            cancellationToken);
+
+    public Task<CompressionJobResult> ProcessJobAsync(
+        CompressionJob job,
+        FFmpegTools tools,
+        IProgress<WorkflowProgress>? progress,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(job);
+        return job.Plan is null
+            ? throw new InvalidOperationException("CompressionJob 尚未生成 CompressionPlan。")
+            : ProcessFileCoreAsync(
+                job.SourceFile,
+                job.UserSettings,
+                tools,
+                job.ScanRoot,
+                progress,
+                cancellationToken,
+                capabilities: null,
+                plannedPlan: job.Plan,
+                plannedCondition: job.Eligibility,
+                job: job);
+    }
 
     private async Task<CompressionJobResult> ProcessFileCoreAsync(
         VideoFileInfo initialInfo,
@@ -89,13 +106,16 @@ public sealed class CompressionWorkflowService
         CancellationToken cancellationToken,
         EncoderCapabilitySet? capabilities,
         CompressionPlan? plannedPlan,
-        ConditionEvaluationResult? plannedCondition)
+        ConditionEvaluationResult? plannedCondition,
+        CompressionJob? job = null)
     {
         string? temporaryOutputPath = null;
         string? passLogPrefix = null;
         OriginalMoveResult? originalMove = null;
         OutputPathReservation? pathReservation = null;
         var source = initialInfo;
+        CompressionPlan? executionPlan = plannedPlan;
+        var attempts = new List<CompressionAttempt>();
         try
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -136,6 +156,7 @@ public sealed class CompressionWorkflowService
             }
 
             var plan = plannedPlan ?? _planner.CreatePlan(source, settings, targetSize, capabilities ?? _defaultCapabilities);
+            executionPlan = (job ?? CompressionJob.Create(source, settings, ruleResult, scanRoot).WithPlan(plan)).Plan;
             if (plannedPlan is null && plan.SmartDecision is { ShouldCompress: false } smartDecision)
             {
                 progress?.Report(new WorkflowProgress(
@@ -150,7 +171,9 @@ public sealed class CompressionWorkflowService
                     SourceInfo: source,
                     Condition: ruleResult,
                     SmartDecision: smartDecision,
-                    Encoder: smartDecision.SelectedEncoder);
+                    Encoder: smartDecision.SelectedEncoder,
+                    PlannedEncoder: plan.Encoder,
+                    PlanId: plan.PlanId);
             }
             var warning = plan.Warnings.Count == 0 ? string.Empty : $" 警告：{string.Join("；", plan.Warnings)}";
             pathReservation = ReserveOutputPaths(source, settings, scanRoot, plannedPlan);
@@ -172,19 +195,26 @@ public sealed class CompressionWorkflowService
                         item,
                         ruleResult,
                         activePlan.SmartDecision,
-                        activePlan.Encoder)));
+                        activePlan.Encoder,
+                        item.ToCompressionProgress(PipelineStage.Execute))));
 
             FFmpegRunResult? encoding = null;
             foreach (var candidate in plan.EncoderCandidates.Take(4))
             {
                 activePlan = plan.WithEncoder(candidate);
+                var attemptIndex = attempts.Count;
+                attempts.Add(new CompressionAttempt(
+                    attempts.Count + 1,
+                    candidate,
+                    CompressionAttemptStatus.Running,
+                    DateTimeOffset.UtcNow));
                 if (candidate != plan.Encoder)
                 {
                     _safeFileService.DeleteTemporaryFile(temporaryOutputPath);
                     _safeFileService.DeletePassLogs(passLogPrefix);
                     progress?.Report(new WorkflowProgress(
                         VideoTaskStatus.Compressing,
-                        $"前一个编码器初始化失败，正在回退到 {EncoderCatalog.Get(candidate).DisplayName}…",
+                        $"前一个编码器未能完成，正在回退到 {EncoderCatalog.Get(candidate).DisplayName}…",
                         Condition: ruleResult,
                         SmartDecision: activePlan.SmartDecision,
                         Encoder: candidate));
@@ -200,12 +230,20 @@ public sealed class CompressionWorkflowService
                         cancellationToken);
                     if (!firstPass.Succeeded)
                     {
-                        if (IsEncoderInitializationFailure(firstPass.ErrorOutput) &&
+                        CompleteAttempt(attempts, attemptIndex, firstPass, "两遍编码第一遍失败");
+                        if (IsFallbackEligible(firstPass) &&
                             TryGetNextCandidate(plan, candidate, out var firstPassNextCandidate))
                         {
-                            var firstPassFallbackNote = $"{EncoderCatalog.Get(candidate).DisplayName} 初始化失败，自动尝试 {EncoderCatalog.Get(firstPassNextCandidate).DisplayName}";
+                            var firstPassFallbackNote = $"{EncoderCatalog.Get(candidate).DisplayName} {FailureDisplay(firstPass)}，自动尝试 {EncoderCatalog.Get(firstPassNextCandidate).DisplayName}";
                             fallbackNotes.Add(firstPassFallbackNote);
                             DiagnosticLog.Write("workflow", firstPassFallbackNote);
+                            progress?.Report(new WorkflowProgress(
+                                VideoTaskStatus.Compressing,
+                                firstPassFallbackNote,
+                                Condition: ruleResult,
+                                SmartDecision: activePlan.SmartDecision,
+                                Encoder: candidate,
+                                FailureKind: firstPass.FailureKind));
                             _safeFileService.DeleteTemporaryFile(temporaryOutputPath);
                             _safeFileService.DeletePassLogs(passLogPrefix);
                             continue;
@@ -218,7 +256,10 @@ public sealed class CompressionWorkflowService
                             ruleResult,
                             activePlan.SmartDecision,
                             candidate,
-                            string.Join("；", fallbackNotes));
+                            string.Join("；", fallbackNotes),
+                            attempts,
+                            plan.Encoder,
+                            plan.PlanId);
                     }
                 }
 
@@ -230,11 +271,14 @@ public sealed class CompressionWorkflowService
                     cancellationToken);
                 if (encoding.Succeeded)
                 {
+                    CompleteAttempt(attempts, attemptIndex, encoding, "编码完成");
                     break;
                 }
 
+                CompleteAttempt(attempts, attemptIndex, encoding, "FFmpeg 压缩失败");
+
                 if (!TryGetNextCandidate(plan, candidate, out var nextCandidate) ||
-                    !IsEncoderInitializationFailure(encoding.ErrorOutput))
+                    !IsFallbackEligible(encoding))
                 {
                     return FailedFromFfmpeg(
                         encoding,
@@ -243,12 +287,22 @@ public sealed class CompressionWorkflowService
                         ruleResult,
                         activePlan.SmartDecision,
                         candidate,
-                        string.Join("；", fallbackNotes));
+                        string.Join("；", fallbackNotes),
+                        attempts,
+                        plan.Encoder,
+                        plan.PlanId);
                 }
 
-                var fallbackNote = $"{EncoderCatalog.Get(candidate).DisplayName} 初始化失败，自动尝试 {EncoderCatalog.Get(nextCandidate).DisplayName}";
+                var fallbackNote = $"{EncoderCatalog.Get(candidate).DisplayName} {FailureDisplay(encoding)}，自动尝试 {EncoderCatalog.Get(nextCandidate).DisplayName}";
                 fallbackNotes.Add(fallbackNote);
                 DiagnosticLog.Write("workflow", fallbackNote);
+                progress?.Report(new WorkflowProgress(
+                    VideoTaskStatus.Compressing,
+                    fallbackNote,
+                    Condition: ruleResult,
+                    SmartDecision: activePlan.SmartDecision,
+                    Encoder: candidate,
+                    FailureKind: encoding.FailureKind));
                 _safeFileService.DeleteTemporaryFile(temporaryOutputPath);
                 _safeFileService.DeletePassLogs(passLogPrefix);
             }
@@ -262,7 +316,10 @@ public sealed class CompressionWorkflowService
                     ruleResult,
                     activePlan.SmartDecision,
                     activePlan.Encoder,
-                    string.Join("；", fallbackNotes));
+                    string.Join("；", fallbackNotes),
+                    attempts,
+                    plan.Encoder,
+                    plan.PlanId);
             }
 
             progress?.Report(new WorkflowProgress(
@@ -271,7 +328,7 @@ public sealed class CompressionWorkflowService
                 Condition: ruleResult,
                 SmartDecision: activePlan.SmartDecision,
                 Encoder: activePlan.Encoder));
-            var verification = await _safeFileService.ValidateOutputAsync(tools, source, temporaryOutputPath, cancellationToken);
+            var verification = await _safeFileService.ValidateOutputAsync(tools, source, temporaryOutputPath, activePlan, cancellationToken);
             if (!verification.IsValid)
             {
                 return new CompressionJobResult(
@@ -281,7 +338,11 @@ public sealed class CompressionWorkflowService
                     OutputInfo: verification.OutputInfo,
                     Condition: ruleResult,
                     SmartDecision: activePlan.SmartDecision,
-                    Encoder: activePlan.Encoder);
+                    Encoder: activePlan.Encoder,
+                    Attempts: attempts.ToArray(),
+                    FailureKind: CompressionFailureKind.ValidationFailed,
+                    PlannedEncoder: plan.Encoder,
+                    PlanId: plan.PlanId);
             }
 
             var outputLength = new FileInfo(temporaryOutputPath).Length;
@@ -296,19 +357,27 @@ public sealed class CompressionWorkflowService
                     Condition: ruleResult,
                     SmartDecision: activePlan.SmartDecision,
                     Encoder: activePlan.Encoder,
-                    FallbackReason: string.Join("；", fallbackNotes));
+                    FallbackReason: string.Join("；", fallbackNotes),
+                    Attempts: attempts.ToArray(),
+                    FailureKind: CompressionFailureKind.ResultRejected,
+                    PlannedEncoder: plan.Encoder,
+                    PlanId: plan.PlanId);
             }
             if (settings.DiscardIfLarger && outputLength >= source.FileSizeBytes)
             {
                 return new CompressionJobResult(
                     VideoTaskStatus.Skipped,
-                    $"已跳过：压缩结果为 {DisplayFormat.FileSize(outputLength)}，不小于原文件 {DisplayFormat.FileSize(source.FileSizeBytes)}。",
+                    $"已放弃结果：压缩后的文件为 {DisplayFormat.FileSize(outputLength)}，未小于源文件 {DisplayFormat.FileSize(source.FileSizeBytes)}。源文件已保留。",
                     SourceInfo: source,
                     OutputInfo: verification.OutputInfo,
                     Condition: ruleResult,
                     SmartDecision: activePlan.SmartDecision,
                     Encoder: activePlan.Encoder,
-                    FallbackReason: string.Join("；", fallbackNotes));
+                    FallbackReason: string.Join("；", fallbackNotes),
+                    Attempts: attempts.ToArray(),
+                    FailureKind: CompressionFailureKind.ResultRejected,
+                    PlannedEncoder: plan.Encoder,
+                    PlanId: plan.PlanId);
             }
 
             // The commit boundary: a cancellation before this line leaves both source and final output untouched.
@@ -354,13 +423,18 @@ public sealed class CompressionWorkflowService
                 finalOutputPath,
                 source,
                 verification.OutputInfo,
-                ruleResult,
-                activePlan.SmartDecision,
-                activePlan.Encoder,
-                string.Join("；", fallbackNotes));
+                 ruleResult,
+                 activePlan.SmartDecision,
+                 activePlan.Encoder,
+                string.Join("；", fallbackNotes),
+                attempts.ToArray(),
+                CompressionFailureKind.None,
+                plan.Encoder,
+                plan.PlanId);
         }
         catch (FFmpegCancellationTimeoutException exception)
         {
+            CancelOpenAttempts(attempts, exception.Message);
             var retainedTemporaryPath = temporaryOutputPath;
             temporaryOutputPath = null;
             passLogPrefix = null;
@@ -370,15 +444,35 @@ public sealed class CompressionWorkflowService
             return new CompressionJobResult(
                 VideoTaskStatus.Cancelled,
                 $"取消请求超时：{exception.Message} 原文件未被修改，也不会提交压缩结果。{retainedPathDetail}",
-                SourceInfo: source);
+                SourceInfo: source,
+                Attempts: attempts.ToArray(),
+                FailureKind: CompressionFailureKind.UserCancelled,
+                PlannedEncoder: executionPlan?.Encoder,
+                PlanId: executionPlan?.PlanId);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-            return new CompressionJobResult(VideoTaskStatus.Cancelled, "任务已取消，原文件未被修改。", SourceInfo: source);
+            CancelOpenAttempts(attempts, "用户取消");
+            return new CompressionJobResult(
+                VideoTaskStatus.Cancelled,
+                "任务已取消，原文件未被修改。",
+                SourceInfo: source,
+                Attempts: attempts.ToArray(),
+                FailureKind: CompressionFailureKind.UserCancelled,
+                PlannedEncoder: executionPlan?.Encoder,
+                PlanId: executionPlan?.PlanId);
         }
         catch (Exception exception)
         {
-            return new CompressionJobResult(VideoTaskStatus.Failed, $"处理失败：{exception.Message}", SourceInfo: source);
+            FailOpenAttempts(attempts, exception.Message);
+            return new CompressionJobResult(
+                VideoTaskStatus.Failed,
+                $"处理失败：{exception.Message}",
+                SourceInfo: source,
+                Attempts: attempts.ToArray(),
+                FailureKind: ClassifyGeneralFailure(exception),
+                PlannedEncoder: executionPlan?.Encoder,
+                PlanId: executionPlan?.PlanId);
         }
         finally
         {
@@ -449,7 +543,10 @@ public sealed class CompressionWorkflowService
         ConditionEvaluationResult? condition = null,
         SmartCompressionDecision? smartDecision = null,
         VideoEncoder? encoder = null,
-        string? fallbackReason = null)
+        string? fallbackReason = null,
+        IReadOnlyList<CompressionAttempt>? attempts = null,
+        VideoEncoder? plannedEncoder = null,
+        Guid? planId = null)
     {
         var error = run.ErrorOutput.Trim();
         if (error.Length > 1_500)
@@ -464,8 +561,108 @@ public sealed class CompressionWorkflowService
             Condition: condition,
             SmartDecision: smartDecision,
             Encoder: encoder,
-            FallbackReason: string.IsNullOrWhiteSpace(fallbackReason) ? null : fallbackReason);
+            FallbackReason: string.IsNullOrWhiteSpace(fallbackReason) ? null : fallbackReason,
+            Attempts: attempts,
+            FailureKind: run.FailureKind,
+            PlannedEncoder: plannedEncoder,
+            PlanId: planId);
     }
+
+    private static void CompleteAttempt(
+        IList<CompressionAttempt> attempts,
+        int attemptIndex,
+        FFmpegRunResult run,
+        string message)
+    {
+        if (attemptIndex < 0 || attemptIndex >= attempts.Count)
+        {
+            return;
+        }
+
+        var status = run.Succeeded
+            ? CompressionAttemptStatus.Completed
+            : run.FailureKind == CompressionFailureKind.EncoderStall
+                ? CompressionAttemptStatus.Stalled
+                : run.FailureKind == CompressionFailureKind.UserCancelled
+                    ? CompressionAttemptStatus.Cancelled
+                    : CompressionAttemptStatus.Failed;
+        attempts[attemptIndex] = attempts[attemptIndex] with
+        {
+            Status = status,
+            CompletedAt = DateTimeOffset.UtcNow,
+            FailureKind = run.Succeeded ? CompressionFailureKind.None : run.FailureKind,
+            Message = message
+        };
+    }
+
+    private static void CancelOpenAttempts(IList<CompressionAttempt> attempts, string message)
+    {
+        for (var index = 0; index < attempts.Count; index++)
+        {
+            if (attempts[index].Status == CompressionAttemptStatus.Running)
+            {
+                attempts[index] = attempts[index] with
+                {
+                    Status = CompressionAttemptStatus.Cancelled,
+                    CompletedAt = DateTimeOffset.UtcNow,
+                    FailureKind = CompressionFailureKind.UserCancelled,
+                    Message = message
+                };
+            }
+        }
+    }
+
+    private static void FailOpenAttempts(IList<CompressionAttempt> attempts, string message)
+    {
+        for (var index = 0; index < attempts.Count; index++)
+        {
+            if (attempts[index].Status == CompressionAttemptStatus.Running)
+            {
+                attempts[index] = attempts[index] with
+                {
+                    Status = CompressionAttemptStatus.Failed,
+                    CompletedAt = DateTimeOffset.UtcNow,
+                    FailureKind = CompressionFailureKind.Unknown,
+                    Message = message
+                };
+            }
+        }
+    }
+
+    private static bool IsFallbackEligible(FFmpegRunResult run) =>
+        run.FailureKind is CompressionFailureKind.EncoderStall or
+            CompressionFailureKind.EncoderUnavailable or
+            CompressionFailureKind.DeviceInitializationFailure or
+            CompressionFailureKind.HardwareSessionFailure ||
+        run.FailureKind == CompressionFailureKind.Unknown && IsEncoderInitializationFailure(run.ErrorOutput);
+
+    private static string FailureDisplay(FFmpegRunResult run) => run.FailureKind switch
+    {
+        CompressionFailureKind.EncoderStall => "进度停滞",
+        CompressionFailureKind.EncoderUnavailable => "不可用",
+        CompressionFailureKind.HardwareSessionFailure => "硬件资源不足",
+        CompressionFailureKind.DeviceInitializationFailure => "初始化失败",
+        _ => "执行失败"
+    };
+
+    private static CompressionFailureKind ClassifyValidationFailure(string? error)
+    {
+        var text = error?.ToLowerInvariant() ?? string.Empty;
+        return text.Contains("权限") || text.Contains("permission")
+            ? CompressionFailureKind.PermissionFailure
+            : text.Contains("磁盘") || text.Contains("space")
+                ? CompressionFailureKind.DiskSpaceFailure
+                : text.Contains("视频") || text.Contains("时长") || text.Contains("codec")
+                    ? CompressionFailureKind.SourceCorrupt
+                    : CompressionFailureKind.Unknown;
+    }
+
+    private static CompressionFailureKind ClassifyGeneralFailure(Exception exception) =>
+        exception is UnauthorizedAccessException
+            ? CompressionFailureKind.PermissionFailure
+            : exception is IOException && exception.Message.Contains("space", StringComparison.OrdinalIgnoreCase)
+                ? CompressionFailureKind.DiskSpaceFailure
+                : CompressionFailureKind.Unknown;
 
     private static bool TryGetNextCandidate(CompressionPlan plan, VideoEncoder candidate, out VideoEncoder nextCandidate)
     {

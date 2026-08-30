@@ -123,7 +123,148 @@ public enum VideoCodecKind
     [Description("H.264")]
     H264,
     [Description("H.265 / HEVC")]
-    H265
+    H265,
+    [Description("AV1")]
+    Av1
+}
+
+/// <summary>
+/// Codec is the bitstream format. It is intentionally separate from the
+/// concrete FFmpeg encoder implementation below.
+/// </summary>
+public enum VideoCodec
+{
+    H264,
+    Hevc,
+    Av1
+}
+
+/// <summary>
+/// Concrete encoder implementation used by FFmpeg. VideoEncoder is retained
+/// as the persisted/legacy UI enum; this enum is the domain vocabulary used by
+/// the new pipeline and maps one-to-one to it.
+/// </summary>
+public enum EncoderImplementation
+{
+    Libx264,
+    Libx265,
+    H264Nvenc,
+    HevcNvenc,
+    H264Qsv,
+    HevcQsv,
+    H264Amf,
+    HevcAmf,
+    LibsvtAv1
+}
+
+public enum EncoderType
+{
+    Software,
+    Hardware
+}
+
+public enum RateControlMode
+{
+    ConstantRateFactor,
+    ConstantQuality,
+    ConstantQuantizer,
+    AverageBitrate,
+    VariableBitrate,
+    TargetSizeTwoPass,
+    QualityVariableBitrate
+}
+
+public enum CompressionProfile
+{
+    [Description("高质量")]
+    HighQuality,
+    [Description("平衡")]
+    Balanced,
+    [Description("节省空间")]
+    SpaceSaving,
+    [Description("远程播放")]
+    RemotePlayback,
+    [Description("自定义")]
+    Custom
+}
+
+public enum AudioPolicy
+{
+    FollowSettings,
+    CopyWhenPossible,
+    PreferAac
+}
+
+public enum BandwidthPolicy
+{
+    None,
+    RespectSafeTotalBudget
+}
+
+public enum SpeedVsEfficiencyPreference
+{
+    Efficiency,
+    Balanced,
+    Speed
+}
+
+public enum PipelineStage
+{
+    Discover,
+    Probe,
+    Evaluate,
+    Plan,
+    Preview,
+    Execute,
+    Validate,
+    Commit,
+    Result
+}
+
+public enum CompressionAttemptStatus
+{
+    [Description("等待")]
+    Pending,
+    [Description("执行中")]
+    Running,
+    [Description("已完成")]
+    Completed,
+    [Description("失败")]
+    Failed,
+    [Description("进度停滞")]
+    Stalled,
+    [Description("已取消")]
+    Cancelled
+}
+
+public enum CompressionFailureKind
+{
+    [Description("无")]
+    None,
+    [Description("编码器不可用")]
+    EncoderUnavailable,
+    [Description("设备初始化失败")]
+    DeviceInitializationFailure,
+    [Description("硬件会话失败")]
+    HardwareSessionFailure,
+    [Description("编码进度停滞")]
+    EncoderStall,
+    [Description("输出路径失败")]
+    OutputPathFailure,
+    [Description("磁盘空间不足")]
+    DiskSpaceFailure,
+    [Description("源文件损坏或不完整")]
+    SourceCorrupt,
+    [Description("权限失败")]
+    PermissionFailure,
+    [Description("用户取消")]
+    UserCancelled,
+    [Description("输出验证失败")]
+    ValidationFailed,
+    [Description("压缩结果已放弃")]
+    ResultRejected,
+    [Description("未知错误")]
+    Unknown
 }
 
 public enum EncoderSelectionMode

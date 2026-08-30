@@ -153,7 +153,7 @@
         </Style>
 
         <ItemsPanelTemplate x:Key="SettingsTabItemsPanel">
-            <UniformGrid Rows="2" Columns="3" />
+            <UniformGrid Rows="2" Columns="4" />
         </ItemsPanelTemplate>
 
         <Style x:Key="VisibleForCrfMode" TargetType="{x:Type FrameworkElement}">
@@ -784,7 +784,7 @@
                                                 <ColumnDefinition Width="112" />
                                                 <ColumnDefinition Width="*" />
                                             </Grid.ColumnDefinitions>
-                                            <TextBlock Grid.Column="0" Text="压缩方式" Style="{StaticResource FieldLabelStyle}" />
+                                            <TextBlock Grid.Column="0" Text="压缩模式" Style="{StaticResource FieldLabelStyle}" />
                                             <ComboBox Grid.Column="1"
                                                       Style="{StaticResource SelectStyle}"
                                                       ItemsSource="{Binding CompressionModes}"
@@ -795,7 +795,7 @@
                                                 <ColumnDefinition Width="112" />
                                                 <ColumnDefinition Width="*" />
                                             </Grid.ColumnDefinitions>
-                                            <TextBlock Grid.Column="0" Text="CRF" Style="{StaticResource FieldLabelStyle}" />
+                                            <TextBlock Grid.Column="0" Text="质量参数（CRF）" Style="{StaticResource FieldLabelStyle}" />
                                             <TextBox Grid.Column="1"
                                                      Style="{StaticResource InputStyle}"
                                                      Text="{Binding Settings.Crf, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
@@ -896,19 +896,40 @@
                                                 <TextBlock Text="最低收益" VerticalAlignment="Center" Foreground="{StaticResource MutedTextBrush}" />
                                                 <TextBox Width="72" Margin="5,0,0,0" Style="{StaticResource InputStyle}"
                                                          Text="{Binding Settings.SmartMinimumExpectedSavingRatio, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                                                </StackPanel>
+                                        </Grid>
+                                        <Grid Style="{StaticResource VisibleForSmartMode}" Margin="0,0,0,8">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="112" />
+                                                <ColumnDefinition Width="*" />
+                                            </Grid.ColumnDefinitions>
+                                            <TextBlock Grid.Column="0" Text="质量校准" Style="{StaticResource FieldLabelStyle}" />
+                                            <StackPanel Grid.Column="1">
+                                                <CheckBox Content="启用高级智能质量（VMAF）"
+                                                          IsChecked="{Binding Settings.EnableAdvancedQualityCalibration, Mode=TwoWay}" />
+                                                <StackPanel Orientation="Horizontal" Margin="0,5,0,0">
+                                                    <TextBlock Text="目标 VMAF" VerticalAlignment="Center" Foreground="{StaticResource MutedTextBrush}" />
+                                                    <TextBox Width="64" Margin="6,0,12,0"
+                                                             Style="{StaticResource InputStyle}"
+                                                             Text="{Binding Settings.VmafTarget, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                                                    <TextBlock Text="抽样秒数" VerticalAlignment="Center" Foreground="{StaticResource MutedTextBrush}" />
+                                                    <TextBox Width="52" Margin="6,0,0,0"
+                                                             Style="{StaticResource InputStyle}"
+                                                             Text="{Binding Settings.QualityCalibrationSampleSeconds, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                                                </StackPanel>
                                             </StackPanel>
                                         </Grid>
                                         <TextBlock Style="{StaticResource VisibleForSmartMode}"
                                                    Margin="112,0,0,8"
                                                    Foreground="{StaticResource MutedTextBrush}"
                                                    TextWrapping="Wrap"
-                                                   Text="远程播放会将带宽乘以安全系数，再扣除音频与容器/峰值余量；它不是把所有视频固定压到同一个 Mbps。" />
+                                                   Text="远程播放会将带宽乘以安全系数，再扣除音频与容器/峰值余量；它不是把所有视频固定压到同一个 Mbps。高级质量会在正式编码前对代表片段抽样，若当前 FFmpeg 没有 libvmaf 会自动回退普通智能规划。" />
                                         <Grid Margin="0,0,0,8">
                                             <Grid.ColumnDefinitions>
                                                 <ColumnDefinition Width="112" />
                                                 <ColumnDefinition Width="*" />
                                             </Grid.ColumnDefinitions>
-                                            <TextBlock Grid.Column="0" Text="Preset" Style="{StaticResource FieldLabelStyle}" />
+                                            <TextBlock Grid.Column="0" Text="编码预设" Style="{StaticResource FieldLabelStyle}" />
                                             <ComboBox Grid.Column="1"
                                                       Style="{StaticResource SelectStyle}"
                                                       ItemsSource="{Binding EncodingPresets}"
@@ -919,7 +940,7 @@
                                                 <ColumnDefinition Width="112" />
                                                 <ColumnDefinition Width="*" />
                                             </Grid.ColumnDefinitions>
-                                            <TextBlock Grid.Column="0" Text="目标编码格式" Style="{StaticResource FieldLabelStyle}" />
+                                            <TextBlock Grid.Column="0" Text="编码格式" Style="{StaticResource FieldLabelStyle}" />
                                             <ComboBox Grid.Column="1"
                                                       Style="{StaticResource SelectStyle}"
                                                       ItemsSource="{Binding OutputVideoCodecs}"
@@ -934,8 +955,21 @@
                                             <ComboBox Grid.Column="1"
                                                       Style="{StaticResource SelectStyle}"
                                                       ItemsSource="{Binding EncoderModes}"
-                                                      SelectedItem="{Binding Settings.SelectedEncoderSelection, Mode=TwoWay}"
-                                                      ToolTip="{Binding EncoderCapabilitySummary}" />
+                                                      SelectedValuePath="Mode"
+                                                      SelectedValue="{Binding Settings.SelectedEncoderSelection, Mode=TwoWay}"
+                                                      ToolTip="{Binding EncoderCapabilitySummary}">
+                                                <ComboBox.ItemContainerStyle>
+                                                    <Style TargetType="ComboBoxItem">
+                                                        <Setter Property="IsEnabled" Value="{Binding IsAvailable}" />
+                                                        <Setter Property="ToolTip" Value="{Binding ToolTip}" />
+                                                    </Style>
+                                                </ComboBox.ItemContainerStyle>
+                                                <ComboBox.ItemTemplate>
+                                                    <DataTemplate>
+                                                        <TextBlock Text="{Binding AvailabilityDisplay}" />
+                                                    </DataTemplate>
+                                                </ComboBox.ItemTemplate>
+                                            </ComboBox>
                                         </Grid>
                                     </StackPanel>
                                 </GroupBox>
@@ -1188,7 +1222,7 @@
                                             <ColumnDefinition Width="*" />
                                             <ColumnDefinition Width="Auto" />
                                         </Grid.ColumnDefinitions>
-                                        <TextBlock Grid.Row="0" Grid.Column="0" Text="FFmpeg 路径" Style="{StaticResource FieldLabelStyle}" />
+                                        <TextBlock Grid.Row="0" Grid.Column="0" Text="FFmpeg 工具目录" Style="{StaticResource FieldLabelStyle}" />
                                          <TextBox Grid.Row="0" Grid.Column="1"
                                                   Style="{StaticResource InputStyle}"
                                                   Text="{Binding Settings.FFmpegDirectory, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
@@ -1209,6 +1243,59 @@
                                         </DockPanel>
                                     </Grid>
                                 </GroupBox>
+                            </StackPanel>
+                        </ScrollViewer>
+                    </TabItem>
+
+                    <TabItem Header="历史记录">
+                        <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                            <StackPanel Margin="12">
+                                <TextBlock Text="最近处理结果" FontSize="15" FontWeight="SemiBold" />
+                                <TextBlock Text="{Binding HistoryStatus}"
+                                           Foreground="{StaticResource MutedTextBrush}"
+                                           Margin="0,4,0,10" />
+                                <ItemsControl ItemsSource="{Binding History}">
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate>
+                                            <Border Padding="9"
+                                                    Margin="0,0,0,8"
+                                                    Background="#FAFBFC"
+                                                    BorderBrush="{StaticResource BorderBrush}"
+                                                    BorderThickness="1"
+                                                    CornerRadius="5"
+                                                    ToolTip="{Binding SourceFile}">
+                                                <StackPanel>
+                                                    <DockPanel>
+                                                        <TextBlock Text="{Binding FileNameDisplay}"
+                                                                   FontWeight="SemiBold"
+                                                                   TextTrimming="CharacterEllipsis" />
+                                                        <TextBlock DockPanel.Dock="Right"
+                                                                   Text="{Binding ResultDisplay}"
+                                                                   Foreground="#1D4ED8"
+                                                                   FontWeight="SemiBold"
+                                                                   Margin="8,0,0,0" />
+                                                    </DockPanel>
+                                                    <TextBlock Text="{Binding DateDisplay}"
+                                                               Foreground="{StaticResource MutedTextBrush}"
+                                                               Margin="0,4,0,0" />
+                                                    <TextBlock Text="{Binding PlannedEncoderDisplay, StringFormat=计划：{0}}"
+                                                               TextWrapping="Wrap"
+                                                               Margin="0,5,0,0" />
+                                                    <TextBlock Text="{Binding ActualEncoderDisplay, StringFormat=实际：{0}}"
+                                                               TextWrapping="Wrap"
+                                                               Margin="0,3,0,0" />
+                                                    <StackPanel Orientation="Horizontal" Margin="0,3,0,0">
+                                                        <TextBlock Text="{Binding BeforeSizeDisplay}" />
+                                                        <TextBlock Text=" → " />
+                                                        <TextBlock Text="{Binding AfterSizeDisplay}" />
+                                                        <TextBlock Text=" · 节省 " />
+                                                        <TextBlock Text="{Binding SavingDisplay}" />
+                                                    </StackPanel>
+                                                </StackPanel>
+                                            </Border>
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
                             </StackPanel>
                         </ScrollViewer>
                     </TabItem>

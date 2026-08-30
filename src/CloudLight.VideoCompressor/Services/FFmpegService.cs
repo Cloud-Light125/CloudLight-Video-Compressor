@@ -6,7 +6,12 @@ using CloudLight.VideoCompressor.Models;
 
 namespace CloudLight.VideoCompressor.Services;
 
-public sealed record FFmpegRunResult(bool Succeeded, int ExitCode, string ErrorOutput);
+public sealed record FFmpegRunResult(
+    bool Succeeded,
+    int ExitCode,
+    string ErrorOutput,
+    CompressionFailureKind FailureKind = CompressionFailureKind.None,
+    string? FailureMessage = null);
 
 public sealed class FFmpegCancellationTimeoutException : OperationCanceledException
 {
@@ -25,7 +30,8 @@ public sealed class FFmpegService
         IReadOnlyList<string> arguments,
         double? durationSeconds,
         IProgress<EncodingProgress>? progress,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        EncoderProgressWatchdog? progressWatchdog = null)
     {
         var startInfo = new ProcessStartInfo
         {
@@ -48,12 +54,17 @@ public sealed class FFmpegService
         using var process = new Process { StartInfo = startInfo };
         var errorBuilder = new StringBuilder();
         var inputDuration = new InputDuration(durationSeconds);
+        var watchdog = progressWatchdog ?? new EncoderProgressWatchdog();
+        var progressState = new ProgressState();
+        using var watchdogCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var stallSource = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
         process.Start();
         using var trackedProcess = MediaProcessRegistry.Register(process);
         var processId = process.Id;
         using var registration = cancellationToken.Register(() => TryKill(process));
-        var progressTask = ReadProgressAsync(process.StandardOutput, inputDuration, progress);
+        var progressTask = ReadProgressAsync(process.StandardOutput, inputDuration, progress, watchdog, progressState);
         var errorTask = ReadErrorAsync(process.StandardError, errorBuilder, inputDuration);
+        var watchdogTask = MonitorWatchdogAsync(process, watchdog, stallSource, watchdogCancellation.Token);
         try
         {
             await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
@@ -69,15 +80,40 @@ public sealed class FFmpegService
             await WaitForReaderTasksWithinAsync(progressTask, errorTask, CancellationExitTimeout).ConfigureAwait(false);
             throw;
         }
+        finally
+        {
+            watchdogCancellation.Cancel();
+            try
+            {
+                await watchdogTask.ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (watchdogCancellation.IsCancellationRequested)
+            {
+                // The watchdog is intentionally cancelled when FFmpeg exits or the caller cancels.
+            }
+        }
         if (!await WaitForReaderTasksWithinAsync(progressTask, errorTask, TimeSpan.FromSeconds(5)).ConfigureAwait(false))
         {
             throw new IOException("FFmpeg 已退出，但 stdout/stderr 读取未在时限内结束。");
         }
 
-        return new FFmpegRunResult(process.ExitCode == 0, process.ExitCode, errorBuilder.ToString());
+        var stalled = stallSource.Task.IsCompletedSuccessfully ? stallSource.Task.Result : null;
+        return process.ExitCode == 0 && stalled is null
+            ? new FFmpegRunResult(true, process.ExitCode, errorBuilder.ToString())
+            : new FFmpegRunResult(
+                false,
+                process.ExitCode,
+                CombineError(errorBuilder.ToString(), stalled),
+                stalled is null ? ClassifyFailure(errorBuilder.ToString()) : CompressionFailureKind.EncoderStall,
+                stalled);
     }
 
-    private static async Task ReadProgressAsync(StreamReader reader, InputDuration inputDuration, IProgress<EncodingProgress>? receiver)
+    private static async Task ReadProgressAsync(
+        StreamReader reader,
+        InputDuration inputDuration,
+        IProgress<EncodingProgress>? receiver,
+        EncoderProgressWatchdog watchdog,
+        ProgressState state)
     {
         var values = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         while (true)
@@ -104,30 +140,44 @@ public sealed class FFmpegService
                 continue;
             }
 
-            receiver?.Report(CreateProgress(values, inputDuration.Seconds, line.EndsWith("end", StringComparison.OrdinalIgnoreCase)));
+            var progress = CreateProgress(values, inputDuration.Seconds, line.EndsWith("end", StringComparison.OrdinalIgnoreCase), state);
+            watchdog.Observe(progress);
+            receiver?.Report(progress);
             values.Clear();
         }
     }
 
-    private static EncodingProgress CreateProgress(IReadOnlyDictionary<string, string> values, double? durationSeconds, bool isEnd)
+    private static EncodingProgress CreateProgress(
+        IReadOnlyDictionary<string, string> values,
+        double? durationSeconds,
+        bool isEnd,
+        ProgressState state)
     {
         var outTimeMicroseconds = GetLong(values, "out_time_us") ?? GetLong(values, "out_time_ms") ?? 0;
         var seconds = outTimeMicroseconds / 1_000_000d;
         var speed = values.TryGetValue("speed", out var speedText) ? speedText : null;
-        var speedValue = ParseSpeed(speed);
         var percent = durationSeconds is > 0 ? Math.Clamp(seconds / durationSeconds.Value * 100d, 0, isEnd ? 100 : 99.9) : 0;
         if (isEnd)
         {
             percent = 100;
         }
 
-        TimeSpan? remaining = null;
-        if (durationSeconds is > 0 && speedValue is > 0 && seconds > 0)
-        {
-            remaining = TimeSpan.FromSeconds(Math.Max(0, (durationSeconds.Value - seconds) / speedValue.Value));
-        }
-
-        return new EncodingProgress(percent, GetDouble(values, "fps"), speed, GetLong(values, "total_size"), remaining);
+        var now = DateTimeOffset.UtcNow;
+        var eta = state.Eta.Update(seconds, durationSeconds, now);
+        var stableRemaining = isEnd ? TimeSpan.Zero : eta.IsStable ? eta.Remaining : null;
+        return new EncodingProgress(
+            percent,
+            GetDouble(values, "fps"),
+            speed,
+            GetLong(values, "total_size"),
+            stableRemaining,
+            seconds,
+            durationSeconds,
+            GetLong(values, "frame"),
+            ParseBitrate(values.TryGetValue("bitrate", out var bitrate) ? bitrate : null),
+            now - state.StartedAt,
+            now,
+            isEnd || eta.IsStable);
     }
 
     private static async Task ReadErrorAsync(StreamReader reader, StringBuilder destination, InputDuration inputDuration)
@@ -158,6 +208,45 @@ public sealed class FFmpegService
         }
     }
 
+    private static async Task MonitorWatchdogAsync(
+        Process process,
+        EncoderProgressWatchdog watchdog,
+        TaskCompletionSource<string> stallSource,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            while (!cancellationToken.IsCancellationRequested)
+            {
+                if (process.HasExited)
+                {
+                    return;
+                }
+
+                var decision = watchdog.Check();
+                if (decision.IsStalled)
+                {
+                    if (stallSource.TrySetResult(decision.Reason))
+                    {
+                        TryKill(process);
+                    }
+
+                    return;
+                }
+
+                await Task.Delay(TimeSpan.FromSeconds(1), cancellationToken).ConfigureAwait(false);
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            // Normal shutdown after FFmpeg exits or the caller cancels.
+        }
+        catch (InvalidOperationException)
+        {
+            // The process handle was released while the watchdog was checking it.
+        }
+    }
+
     private static bool TryParseInputDuration(string line, out double durationSeconds)
     {
         durationSeconds = 0;
@@ -184,6 +273,91 @@ public sealed class FFmpegService
 
     private static double? GetDouble(IReadOnlyDictionary<string, string> values, string key) =>
         values.TryGetValue(key, out var text) && double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out var value) ? value : null;
+
+    private static long? ParseBitrate(string? bitrate)
+    {
+        if (string.IsNullOrWhiteSpace(bitrate))
+        {
+            return null;
+        }
+
+        var normalized = bitrate.Trim();
+        var multiplier = 1d;
+        if (normalized.EndsWith("kbits/s", StringComparison.OrdinalIgnoreCase))
+        {
+            multiplier = 1_000d;
+            normalized = normalized[..^"kbits/s".Length].Trim();
+        }
+        else if (normalized.EndsWith("mbits/s", StringComparison.OrdinalIgnoreCase))
+        {
+            multiplier = 1_000_000d;
+            normalized = normalized[..^"mbits/s".Length].Trim();
+        }
+        else if (normalized.EndsWith("bits/s", StringComparison.OrdinalIgnoreCase))
+        {
+            normalized = normalized[..^"bits/s".Length].Trim();
+        }
+
+        return double.TryParse(normalized, NumberStyles.Float, CultureInfo.InvariantCulture, out var value) && value >= 0
+            ? (long)Math.Round(value * multiplier)
+            : null;
+    }
+
+    private static string CombineError(string error, string? stallReason)
+    {
+        if (string.IsNullOrWhiteSpace(stallReason))
+        {
+            return error;
+        }
+
+        return string.IsNullOrWhiteSpace(error)
+            ? $"编码看门狗：{stallReason}"
+            : $"{error.TrimEnd()}\n编码看门狗：{stallReason}";
+    }
+
+    private static CompressionFailureKind ClassifyFailure(string error)
+    {
+        var text = error.ToLowerInvariant();
+        if (text.Contains("no capable device") ||
+            text.Contains("cannot load") ||
+            text.Contains("failed to create") ||
+            text.Contains("error while opening encoder") ||
+            text.Contains("driver") ||
+            text.Contains("initialization"))
+        {
+            return CompressionFailureKind.DeviceInitializationFailure;
+        }
+
+        if (text.Contains("resource busy") ||
+            text.Contains("session limit") ||
+            text.Contains("too many sessions") ||
+            text.Contains("device unavailable"))
+        {
+            return CompressionFailureKind.HardwareSessionFailure;
+        }
+
+        if (text.Contains("unknown encoder") || text.Contains("encoder not found"))
+        {
+            return CompressionFailureKind.EncoderUnavailable;
+        }
+
+        if (text.Contains("permission denied") || text.Contains("access is denied"))
+        {
+            return CompressionFailureKind.PermissionFailure;
+        }
+
+        if (text.Contains("no space left") || text.Contains("disk full"))
+        {
+            return CompressionFailureKind.DiskSpaceFailure;
+        }
+
+        if (text.Contains("invalid data found") || text.Contains("moov atom not found"))
+        {
+            return CompressionFailureKind.SourceCorrupt;
+        }
+
+        return CompressionFailureKind.Unknown;
+    }
 
     private static double? ParseSpeed(string? speed)
     {
@@ -273,5 +447,12 @@ public sealed class FFmpegService
                 _seconds ??= seconds;
             }
         }
+    }
+
+    private sealed class ProgressState
+    {
+        public DateTimeOffset StartedAt { get; } = DateTimeOffset.UtcNow;
+
+        public EtaCalculator Eta { get; } = new();
     }
 }

@@ -9,4 +9,8 @@ public sealed record CompressionJobResult(
     ConditionEvaluationResult? Condition = null,
     SmartCompressionDecision? SmartDecision = null,
     VideoEncoder? Encoder = null,
-    string? FallbackReason = null);
+    string? FallbackReason = null,
+    IReadOnlyList<CompressionAttempt>? Attempts = null,
+    CompressionFailureKind FailureKind = CompressionFailureKind.None,
+    VideoEncoder? PlannedEncoder = null,
+    Guid? PlanId = null);

@@ -133,7 +133,7 @@ public sealed class FFmpegIntegrationTests
 
         // Lossless CRF makes a larger result; the default safety option discards it and leaves the source.
         var largerSource = Path.Combine(directory.Path, "larger.mp4");
-        await CreateVideoAsync(tools.FFmpegPath, largerSource, "320x180", 30, 4, "350k");
+        await CreateVideoAsync(tools.FFmpegPath, largerSource, "160x90", 30, 4, "20k");
         var discardLarger = new AppSettings
         {
             VideoEncoder = VideoEncoder.Libx264,
@@ -144,6 +144,7 @@ public sealed class FFmpegIntegrationTests
         };
         var largerResult = await workflow.ProcessFileAsync(VideoFileInfo.FromFile(largerSource), discardLarger, tools, directory.Path, null, CancellationToken.None);
         Assert.Equal(VideoTaskStatus.Skipped, largerResult.Status);
+        Assert.Equal(CompressionFailureKind.ResultRejected, largerResult.FailureKind);
         Assert.True(File.Exists(largerSource));
         Assert.False(File.Exists(Path.Combine(directory.Path, "larger_lossless.mp4")));
 

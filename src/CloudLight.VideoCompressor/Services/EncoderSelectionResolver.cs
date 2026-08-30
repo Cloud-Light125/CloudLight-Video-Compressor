@@ -23,7 +23,17 @@ public static class EncoderSelectionResolver
         var mode = settings.EncoderSelection;
         if (mode is null)
         {
-            if (capabilities?.Get(settings.VideoEncoder) is { IsUsable: false } unavailable)
+            var legacyEncoder = settings.VideoEncoder;
+            if (EncoderCatalog.Get(legacyEncoder).Codec != codec)
+            {
+                var softwareForCodec = SoftwareEncoder(codec);
+                return new EncoderSelectionResult(
+                    softwareForCodec,
+                    [],
+                    [$"旧设置中的编码器 {EncoderCatalog.Get(legacyEncoder).DisplayName} 与目标编码格式不一致，已使用 {EncoderCatalog.Get(softwareForCodec).DisplayName}。"]);
+            }
+
+            if (capabilities?.Get(legacyEncoder) is { IsUsable: false } unavailable)
             {
                 var software = SoftwareEncoder(codec);
                 return new EncoderSelectionResult(
@@ -32,7 +42,10 @@ public static class EncoderSelectionResolver
                     [$"{unavailable.DisplayName} 当前不可用：{unavailable.UnavailableReason} 已回退到 {EncoderCatalog.Get(software).DisplayName}。"]);
             }
 
-            return new EncoderSelectionResult(settings.VideoEncoder, [], []);
+            return new EncoderSelectionResult(
+                settings.VideoEncoder,
+                IsHardware(legacyEncoder) ? [SoftwareEncoder(codec)] : [],
+                []);
         }
 
         var candidates = mode.Value switch
@@ -61,14 +74,19 @@ public static class EncoderSelectionResolver
             warnings.Add($"{EncoderCatalog.Get(candidates[0]).DisplayName} 当前不可用，已回退到 {EncoderCatalog.Get(usable[0]).DisplayName}。 ");
         }
 
-        var fallback = mode is EncoderSelectionMode.Automatic or EncoderSelectionMode.HardwareAutomatic
+        var fallback = mode is not EncoderSelectionMode.CpuSoftware
             ? usable.Skip(1).Take(3).ToArray()
             : [];
         return new EncoderSelectionResult(usable[0], fallback, warnings);
     }
 
     public static VideoEncoder SoftwareEncoder(VideoCodecKind codec) =>
-        codec == VideoCodecKind.H264 ? VideoEncoder.Libx264 : VideoEncoder.Libx265;
+        codec switch
+        {
+            VideoCodecKind.H264 => VideoEncoder.Libx264,
+            VideoCodecKind.Av1 => VideoEncoder.LibsvtAv1,
+            _ => VideoEncoder.Libx265
+        };
 
     public static VideoEncoder HardwareEncoder(VideoCodecKind codec, EncoderVendor vendor) =>
         (codec, vendor) switch

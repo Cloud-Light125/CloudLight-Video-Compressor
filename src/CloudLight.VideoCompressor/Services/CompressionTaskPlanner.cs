@@ -15,19 +15,22 @@ public sealed class CompressionTaskPlanner
     private readonly CompressionPlanner _compressionPlanner;
     private readonly TargetSizeCalculator _targetSizeCalculator;
     private readonly OutputPathService _outputPathService;
+    private readonly VmafQualityCalibrationService? _qualityCalibrationService;
 
     public CompressionTaskPlanner(
         RuleEngine ruleEngine,
         FFprobeService ffprobeService,
         CompressionPlanner compressionPlanner,
         TargetSizeCalculator targetSizeCalculator,
-        OutputPathService outputPathService)
+        OutputPathService outputPathService,
+        VmafQualityCalibrationService? qualityCalibrationService = null)
     {
         _ruleEngine = ruleEngine;
         _ffprobeService = ffprobeService;
         _compressionPlanner = compressionPlanner;
         _targetSizeCalculator = targetSizeCalculator;
         _outputPathService = outputPathService;
+        _qualityCalibrationService = qualityCalibrationService;
     }
 
     public async Task<CompressionTaskSession> CreateSessionAsync(
@@ -83,8 +86,52 @@ public sealed class CompressionTaskPlanner
             var plan = _compressionPlanner.CreatePlan(source, settingsSnapshot, targetSize, capabilities);
             if (plan.SmartDecision is { ShouldCompress: false } decision)
             {
+                // Keep the scan result visible on the main page. A smart skip is
+                // an intentional decision, not an empty task list or a silent
+                // disappearance from the user's selection.
+                item.ApplySmartDecision(decision);
+                item.Status = VideoTaskStatus.Skipped;
+                item.StatusDetail = $"智能跳过：{decision.Reason}";
                 planningNotes.Add($"{source.FileName}：智能跳过：{decision.Reason}");
                 continue;
+            }
+
+            if (settingsSnapshot.EnableAdvancedQualityCalibration && _qualityCalibrationService is not null)
+            {
+                var calibration = await _qualityCalibrationService.CalibrateAsync(
+                    source,
+                    settingsSnapshot,
+                    plan.Encoder,
+                    tools,
+                    cancellationToken).ConfigureAwait(false);
+                if (calibration.IsAvailable)
+                {
+                    var calibratedBitrate = calibration.SelectedBitrateBps ?? plan.TargetVideoBitrateBps;
+                    var calibratedMaximum = calibration.SelectedBitrateBps is > 0
+                        ? Math.Max(calibration.SelectedBitrateBps.Value, plan.MaxVideoBitrateBps ?? calibration.SelectedBitrateBps.Value)
+                        : plan.MaxVideoBitrateBps;
+                    plan = plan with
+                    {
+                        Crf = calibration.SelectedQuality ?? plan.Crf,
+                        TargetVideoBitrateBps = calibratedBitrate,
+                        QualityCalibration = calibration,
+                        MaxVideoBitrateBps = calibratedMaximum,
+                        SmartDecision = plan.SmartDecision is { } currentDecision
+                            ? currentDecision with
+                            {
+                                TargetVideoBitrateBps = calibratedBitrate ?? currentDecision.TargetVideoBitrateBps,
+                                MaxVideoBitrateBps = calibratedMaximum ?? currentDecision.MaxVideoBitrateBps
+                            }
+                            : null
+                    };
+                }
+                else
+                {
+                    plan = plan with
+                    {
+                        Warnings = [.. plan.Warnings, calibration.Message]
+                    };
+                }
             }
 
             var targetPath = _outputPathService.GetOutputPath(source, settingsSnapshot, scanRoot, reservedPreviewPaths);
@@ -99,16 +146,22 @@ public sealed class CompressionTaskPlanner
                 SourcePath = source.FullPath,
                 TargetPath = targetPath,
                 TargetCodec = targetCodec,
+                InputInfo = source,
                 RateControl = BuildRateControl(plan, targetSize),
                 EstimatedOutputSizeBytes = estimate.ExactBytes,
                 EstimatedOutputLowerBoundBytes = estimate.LowerBoundBytes,
                 EstimatedOutputUpperBoundBytes = estimate.UpperBoundBytes,
                 TargetSizeBytes = targetSize?.TargetSizeBytes,
-                Reason = reason
+                Reason = reason,
+                CompressionBenefitScore = plan.SmartDecision?.CompressionBenefitScore ?? 0,
+                SourceBitsPerPixel = plan.SmartDecision?.SourceBitsPerPixel,
+                SourceBitsPerPixelPerFrame = plan.SmartDecision?.SourceBitsPerPixelPerFrame,
+                TargetBitsPerPixelPerFrame = plan.SmartDecision?.TargetBitsPerPixelPerFrame
             };
 
             var comparison = BuildComparison(source, plan);
-            entries.Add(new CompressionTaskEntry(source, plan, condition, comparison));
+            var job = CompressionJob.Create(source, settingsSnapshot, condition, scanRoot).WithPlan(plan);
+            entries.Add(new CompressionTaskEntry(source, plan, condition, comparison, job));
         }
 
         return new CompressionTaskSession(entries, settingsSnapshot, scanRoot, planningNotes);
@@ -305,7 +358,12 @@ public sealed class CompressionTaskPlanner
         _ => string.IsNullOrWhiteSpace(codec) ? "未知" : codec
     };
 
-    private static string CodecDisplay(VideoCodecKind codec) => codec == VideoCodecKind.H264 ? "H.264" : "H.265";
+    private static string CodecDisplay(VideoCodecKind codec) => codec switch
+    {
+        VideoCodecKind.H264 => "H.264",
+        VideoCodecKind.Av1 => "AV1",
+        _ => "H.265"
+    };
 
     private static string NormalizeContainer(string extension) => extension.Trim().TrimStart('.').ToUpperInvariant();
 

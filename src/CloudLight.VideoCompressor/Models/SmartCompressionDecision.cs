@@ -20,7 +20,15 @@ public sealed record SmartCompressionDecision(
     SmartRateControlMode RateControlMode,
     long EstimatedOutputSizeBytes,
     double ExpectedSavingRatio,
-    string Explanation)
+    string Explanation,
+    double CompressionBenefitScore = 0,
+    double? SourceBitsPerPixel = null,
+    double? SourceBitsPerPixelPerFrame = null,
+    double? TargetBitsPerPixelPerFrame = null,
+    double? BandwidthBudgetBps = null,
+    double EncoderEfficiency = 1)
 {
     public string DecisionDisplay => ShouldCompress ? "建议压缩" : "智能跳过";
+
+    public string BenefitScoreDisplay => $"{CompressionBenefitScore:0}/100";
 }

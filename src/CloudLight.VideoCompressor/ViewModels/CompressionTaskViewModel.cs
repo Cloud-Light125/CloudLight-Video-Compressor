@@ -13,6 +13,8 @@ public sealed class CompressionTaskViewModel : ObservableObject, IDisposable
     private readonly CompressionWorkflowService _workflowService;
     private readonly FFmpegTools _tools;
     private readonly Dispatcher _dispatcher;
+    private readonly CompressionWorkerPool _workerPool = new();
+    private readonly CompressionHistoryService _historyService;
     private readonly CancellationTokenSource _cancellation = new();
     private bool _hasStarted;
     private bool _isRunning;
@@ -24,12 +26,14 @@ public sealed class CompressionTaskViewModel : ObservableObject, IDisposable
         CompressionTaskSession session,
         CompressionWorkflowService workflowService,
         FFmpegTools tools,
-        Dispatcher? dispatcher = null)
+        Dispatcher? dispatcher = null,
+        CompressionHistoryService? historyService = null)
     {
         _session = session;
         _workflowService = workflowService;
         _tools = tools;
         _dispatcher = dispatcher ?? System.Windows.Application.Current?.Dispatcher ?? Dispatcher.CurrentDispatcher;
+        _historyService = historyService ?? new CompressionHistoryService();
         Entries = session.Entries;
         SelectedEntry = Entries.FirstOrDefault();
         foreach (var entry in Entries)
@@ -235,40 +239,42 @@ public sealed class CompressionTaskViewModel : ObservableObject, IDisposable
 
     private async Task ExecuteAllAsync()
     {
-        using var semaphore = new SemaphoreSlim(
-            Math.Clamp(SettingsSnapshot.CompressionConcurrency, 1, 4),
-            Math.Clamp(SettingsSnapshot.CompressionConcurrency, 1, 4));
-        var tasks = Entries.Select(entry => ExecuteEntryAsync(entry, semaphore)).ToArray();
-        await Task.WhenAll(tasks);
+        foreach (var entry in Entries)
+        {
+            entry.MarkQueued();
+        }
+        RefreshAggregateProperties();
+
+        await _workerPool.ExecuteAsync(
+            Entries,
+            SettingsSnapshot.CompressionConcurrency,
+            ExecuteEntryAsync,
+            _cancellation.Token);
+
+        if (_cancellation.IsCancellationRequested)
+        {
+            ApplyOnUi(() =>
+            {
+                foreach (var entry in Entries.Where(entry => !IsTerminal(entry)))
+                {
+                    entry.MarkCancelled();
+                }
+                RefreshAggregateProperties();
+            });
+        }
     }
 
-    private async Task ExecuteEntryAsync(CompressionTaskEntry entry, SemaphoreSlim semaphore)
+    private async Task ExecuteEntryAsync(CompressionTaskEntry entry)
     {
-        entry.MarkQueued();
-        RefreshAggregateProperties();
-        try
-        {
-            await semaphore.WaitAsync(_cancellation.Token).ConfigureAwait(false);
-        }
-        catch (OperationCanceledException)
-        {
-            entry.MarkCancelled();
-            RefreshAggregateProperties();
-            return;
-        }
-
         try
         {
             var progress = new Progress<WorkflowProgress>(update => ApplyEntryProgress(entry, update));
-            var result = await _workflowService.ProcessPlannedFileAsync(
-                entry.Source,
-                SettingsSnapshot,
-                entry.Plan,
-                entry.ConditionEvaluation,
+            var result = await _workflowService.ProcessJobAsync(
+                entry.Job,
                 _tools,
-                _session.ScanRoot,
                 progress,
                 _cancellation.Token).ConfigureAwait(false);
+            await _historyService.AppendAsync(CompressionHistoryEntry.From(result)).ConfigureAwait(false);
             ApplyOnUi(() =>
             {
                 entry.ApplyResult(result);
@@ -292,10 +298,6 @@ public sealed class CompressionTaskViewModel : ObservableObject, IDisposable
                 RefreshAggregateProperties();
             });
         }
-        finally
-        {
-            semaphore.Release();
-        }
     }
 
     private void ApplyEntryProgress(CompressionTaskEntry entry, WorkflowProgress progress) =>
@@ -313,7 +315,14 @@ public sealed class CompressionTaskViewModel : ObservableObject, IDisposable
             return;
         }
 
-        _dispatcher.Invoke(action);
+        try
+        {
+            _dispatcher.BeginInvoke(action, DispatcherPriority.DataBind);
+        }
+        catch (InvalidOperationException)
+        {
+            // The window dispatcher is shutting down; no UI update is needed.
+        }
     }
 
     private void CancelCurrentOperation()
@@ -401,6 +410,7 @@ public sealed class CompressionTaskViewModel : ObservableObject, IDisposable
         {
             entry.PropertyChanged -= OnEntryPropertyChanged;
         }
+        _historyService.Dispose();
         _cancellation.Dispose();
     }
 }

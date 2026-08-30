@@ -20,6 +20,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     private readonly VideoScannerService _videoScannerService;
     private readonly CompressionWorkflowService _workflowService;
     private readonly CompressionTaskPlanner _compressionTaskPlanner;
+    private readonly CompressionHistoryService _historyService;
     private readonly RuleEngine _ruleEngine = new();
     private readonly OutputPathService _outputPathService = new();
     private readonly Dispatcher _dispatcher;
@@ -31,6 +32,8 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     private Task? _shutdownTask;
     private Task? _capabilityDetectionTask;
     private readonly ICollectionView _videoView;
+    private readonly DispatcherTimer _videoViewRefreshTimer;
+    private bool _videoViewRefreshPending;
     private EncoderCapabilitySet _encoderCapabilities = EncoderCapabilitySet.SoftwareDefaults;
     private Stopwatch? _operationStopwatch;
     private bool _initialized;
@@ -69,7 +72,8 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         CompressionWorkflowService workflowService,
         Dispatcher dispatcher,
         EncoderCapabilityDetector? encoderCapabilityDetector = null,
-        CompressionTaskPlanner? compressionTaskPlanner = null)
+        CompressionTaskPlanner? compressionTaskPlanner = null,
+        CompressionHistoryService? historyService = null)
     {
         _settingsService = settingsService;
         _ffmpegLocator = ffmpegLocator;
@@ -77,7 +81,13 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         _videoScannerService = videoScannerService;
         _workflowService = workflowService;
         _compressionTaskPlanner = compressionTaskPlanner ?? CreateCompressionTaskPlanner();
+        _historyService = historyService ?? new CompressionHistoryService();
         _dispatcher = dispatcher;
+        _videoViewRefreshTimer = new DispatcherTimer(DispatcherPriority.DataBind, _dispatcher)
+        {
+            Interval = TimeSpan.FromMilliseconds(150)
+        };
+        _videoViewRefreshTimer.Tick += OnVideoViewRefreshTimerTick;
         _videoView = CollectionViewSource.GetDefaultView(Videos);
         _videoView.Filter = FilterVideo;
         Videos.CollectionChanged += OnVideosCollectionChanged;
@@ -101,6 +111,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     public event EventHandler<CompressionTaskReadyEventArgs>? CompressionTaskReady;
 
     public ObservableCollection<VideoTaskItem> Videos { get; } = [];
+    public ObservableCollection<CompressionHistoryEntry> History { get; } = [];
     public AppSettings Settings
     {
         get => _settings;
@@ -150,7 +161,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         {
             if (SetProperty(ref _selectedQueueFilter, value))
             {
-                _videoView.Refresh();
+                RequestVideoViewRefresh();
             }
         }
     }
@@ -190,6 +201,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     public int RemainingVideos => Math.Max(0, TotalVideos - CompletedVideos - SkippedVideos - FailedVideos - CancelledVideos);
     public string QueueSummary => $"视频 {TotalVideos} · 符合 {ConditionMatches} · 不符合 {ConditionDoesNotMatch} · 已完成 {CompletedVideos} · 已跳过 {SkippedVideos} · 失败 {FailedVideos} · 剩余 {RemainingVideos}" +
         (ScanTotal > 0 ? $" · 操作 {ScanProgressDisplay}" : string.Empty);
+    public string HistoryStatus => History.Count == 0 ? "暂无压缩记录。" : $"最近 {History.Count} 条记录";
     public string ElapsedDisplay => _operationStopwatch is null ? "—" : _operationStopwatch.Elapsed.ToString(@"hh\:mm\:ss");
     public IReadOnlyList<EncoderCapability> EncoderCapabilities => _encoderCapabilities.Capabilities;
     public string EncoderCapabilitySummary
@@ -217,8 +229,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     public IReadOnlyList<TargetSizeUnit> TargetSizeUnits { get; } = Enum.GetValues<TargetSizeUnit>();
     public ObservableCollection<VideoEncoder> VideoEncoders { get; } = [VideoEncoder.Libx264, VideoEncoder.Libx265];
     public IReadOnlyList<VideoCodecKind> OutputVideoCodecs { get; } = Enum.GetValues<VideoCodecKind>();
-    public ObservableCollection<EncoderSelectionMode> EncoderModes { get; } =
-        [EncoderSelectionMode.Automatic, EncoderSelectionMode.CpuSoftware, EncoderSelectionMode.HardwareAutomatic];
+    public ObservableCollection<EncoderSelectionOption> EncoderModes { get; } = [];
     public IReadOnlyList<SmartCompressionPreset> SmartPresets { get; } = Enum.GetValues<SmartCompressionPreset>();
     public IReadOnlyList<QueueFilter> QueueFilters { get; } = Enum.GetValues<QueueFilter>();
     public IReadOnlyList<AudioMode> AudioModes { get; } = Enum.GetValues<AudioMode>();
@@ -258,6 +269,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
 
             DirectoryPath = Settings.LastDirectory;
             await RefreshFfmpegAsync(_lifetimeCancellation.Token);
+            await RefreshHistoryAsync(_lifetimeCancellation.Token);
         }
         catch (OperationCanceledException) when (_lifetimeCancellation.IsCancellationRequested)
         {
@@ -269,6 +281,31 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     {
         Settings.LastDirectory = DirectoryPath;
         await _settingsService.SaveAsync(Settings, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task RefreshHistoryAsync(CancellationToken cancellationToken = default)
+    {
+        if (_disposed || IsShuttingDown)
+        {
+            return;
+        }
+
+        var entries = await _historyService.LoadAsync(cancellationToken).ConfigureAwait(false);
+        await _dispatcher.InvokeAsync(() =>
+        {
+            if (_disposed)
+            {
+                return;
+            }
+
+            History.Clear();
+            foreach (var entry in entries.Take(100))
+            {
+                History.Add(entry);
+            }
+
+            OnPropertyChanged(nameof(HistoryStatus));
+        }, DispatcherPriority.Background, cancellationToken);
     }
 
     public Task ShutdownAsync(TimeSpan timeout)
@@ -611,9 +648,12 @@ public sealed class MainViewModel : ObservableObject, IDisposable
                 cancellationToken);
             if (session.Entries.Count == 0)
             {
-                StatusMessage = session.PlanningNotes.Count == 0
-                    ? "没有视频进入压缩计划。"
-                    : $"没有视频进入压缩计划：{session.PlanningNotes[0]}";
+                var smartSkippedCount = session.PlanningNotes.Count(note => note.Contains("：智能跳过：", StringComparison.Ordinal));
+                StatusMessage = smartSkippedCount == selected.Count
+                    ? $"{selected.Count} 个已选视频均被智能判断为无需重新压缩。请在主列表查看“智能跳过”和原因。"
+                    : session.PlanningNotes.Count == 0
+                        ? "没有视频进入压缩计划。"
+                        : $"没有视频进入压缩计划：{session.PlanningNotes[0]}";
                 return;
             }
 
@@ -856,27 +896,48 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     {
         var selected = Settings.SelectedEncoderSelection;
         EncoderModes.Clear();
-        EncoderModes.Add(EncoderSelectionMode.Automatic);
-        EncoderModes.Add(EncoderSelectionMode.CpuSoftware);
-        EncoderModes.Add(EncoderSelectionMode.HardwareAutomatic);
-        if (_encoderCapabilities.HasUsableHardware(EncoderVendor.Nvidia, Settings.SelectedVideoCodec))
-        {
-            EncoderModes.Add(EncoderSelectionMode.NvidiaNvenc);
-        }
-        if (_encoderCapabilities.HasUsableHardware(EncoderVendor.Intel, Settings.SelectedVideoCodec))
-        {
-            EncoderModes.Add(EncoderSelectionMode.IntelQsv);
-        }
-        if (_encoderCapabilities.HasUsableHardware(EncoderVendor.Amd, Settings.SelectedVideoCodec))
-        {
-            EncoderModes.Add(EncoderSelectionMode.AmdAmf);
-        }
+        EncoderModes.Add(new EncoderSelectionOption(EncoderSelectionMode.Automatic, true));
+        EncoderModes.Add(new EncoderSelectionOption(EncoderSelectionMode.CpuSoftware, true));
+        EncoderModes.Add(new EncoderSelectionOption(EncoderSelectionMode.HardwareAutomatic, HasAnyUsableHardware(Settings.SelectedVideoCodec),
+            HasAnyUsableHardware(Settings.SelectedVideoCodec) ? null : "当前编码格式没有通过检测的硬件编码器"));
+        EncoderModes.Add(CreateHardwareSelectionOption(
+            EncoderSelectionMode.NvidiaNvenc,
+            EncoderVendor.Nvidia,
+            "未检测到可用的 NVIDIA NVENC 编码环境"));
+        EncoderModes.Add(CreateHardwareSelectionOption(
+            EncoderSelectionMode.IntelQsv,
+            EncoderVendor.Intel,
+            "未检测到可用的 Intel Quick Sync 编码环境"));
+        EncoderModes.Add(CreateHardwareSelectionOption(
+            EncoderSelectionMode.AmdAmf,
+            EncoderVendor.Amd,
+            "未检测到可用的 AMD AMF 编码环境"));
 
-        if (!EncoderModes.Contains(selected))
+        var selectedOption = EncoderModes.FirstOrDefault(option => option.Mode == selected);
+        if (selectedOption is null || !selectedOption.IsAvailable)
         {
             Settings.SelectedEncoderSelection = EncoderSelectionMode.CpuSoftware;
         }
     }
+
+    private EncoderSelectionOption CreateHardwareSelectionOption(
+        EncoderSelectionMode mode,
+        EncoderVendor vendor,
+        string defaultReason)
+    {
+        var capability = _encoderCapabilities.Capabilities.FirstOrDefault(candidate =>
+            candidate.IsHardware && candidate.Vendor == vendor && candidate.Codec == Settings.SelectedVideoCodec);
+        return new EncoderSelectionOption(
+            mode,
+            capability?.IsUsable == true,
+            capability is null
+                ? defaultReason
+                : CompactCapabilityReason(capability.UnavailableReason, defaultReason));
+    }
+
+    private bool HasAnyUsableHardware(VideoCodecKind codec) =>
+        _encoderCapabilities.Capabilities.Any(capability =>
+            capability.IsHardware && capability.Codec == codec && capability.IsUsable);
 
     private static string BuildEncoderCapabilitySummary(EncoderCapabilitySet capabilities)
     {
@@ -887,7 +948,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
             {
                 var usable = group.Where(capability => capability.IsUsable).Select(capability => capability.Codec.GetDescription()).ToArray();
                 return usable.Length == 0
-                    ? $"{group.Key.GetDescription()}：不可用（{group.First().UnavailableReason}）"
+                    ? $"{group.Key.GetDescription()}：不可用（{CompactCapabilityReason(group.First().UnavailableReason, "未通过能力检测")}）"
                     : $"{group.Key.GetDescription()}：可用（{string.Join(" / ", usable.Distinct())}）";
             });
         return string.Join("；", groups);
@@ -896,7 +957,28 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     private static string BuildFfmpegToolTip(FFmpegTools tools, EncoderCapabilitySet capabilities) =>
         $"ffmpeg.exe：{tools.FFmpegPath}{Environment.NewLine}ffprobe.exe：{tools.FFprobePath}{Environment.NewLine}" +
         string.Join(Environment.NewLine, capabilities.Capabilities.Select(capability =>
-            $"{capability.Id}: {(capability.IsUsable ? "可用" : capability.UnavailableReason)}"));
+            $"{capability.Id}: {(capability.IsUsable ? "可用" : CompactCapabilityReason(capability.UnavailableReason, "未通过能力检测"))}"));
+
+    private static string CompactCapabilityReason(string? reason, string fallback)
+    {
+        if (string.IsNullOrWhiteSpace(reason))
+        {
+            return fallback;
+        }
+
+        if (reason.Contains("nvcuda.dll", StringComparison.OrdinalIgnoreCase))
+        {
+            return "NVIDIA 驱动 / CUDA 编码环境不可用（未找到 nvcuda.dll）";
+        }
+
+        if (reason.Contains("amfrt64.dll", StringComparison.OrdinalIgnoreCase))
+        {
+            return "AMD 驱动 / AMF 编码环境不可用（未找到 amfrt64.dll）";
+        }
+
+        var firstLine = reason.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries)[0].Trim();
+        return firstLine.Length <= 140 ? firstLine : $"{firstLine[..140]}…";
+    }
 
     private void ApplyConditionResult(VideoTaskItem item, bool resetTaskStatus)
     {
@@ -977,7 +1059,47 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         OnPropertyChanged(nameof(OverallProgressPercent));
         OnPropertyChanged(nameof(OverallProgressDisplay));
         OnPropertyChanged(nameof(ElapsedDisplay));
-        _videoView.Refresh();
+        RequestVideoViewRefresh();
+    }
+
+    private void RequestVideoViewRefresh()
+    {
+        if (_disposed || _dispatcher.HasShutdownStarted || _dispatcher.HasShutdownFinished)
+        {
+            return;
+        }
+
+        if (!_dispatcher.CheckAccess())
+        {
+            try
+            {
+                _dispatcher.BeginInvoke(RequestVideoViewRefresh, DispatcherPriority.DataBind);
+            }
+            catch (InvalidOperationException)
+            {
+                // The dispatcher is shutting down; the view no longer needs refreshes.
+            }
+
+            return;
+        }
+
+        if (_videoViewRefreshPending)
+        {
+            return;
+        }
+
+        _videoViewRefreshPending = true;
+        _videoViewRefreshTimer.Start();
+    }
+
+    private void OnVideoViewRefreshTimerTick(object? sender, EventArgs e)
+    {
+        _videoViewRefreshTimer.Stop();
+        _videoViewRefreshPending = false;
+        if (!_disposed)
+        {
+            _videoView.Refresh();
+        }
     }
 
     private void OnSettingsPropertyChanged(object? sender, PropertyChangedEventArgs e)
@@ -1255,6 +1377,8 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         }
 
         _disposed = true;
+        _videoViewRefreshTimer.Stop();
+        _videoViewRefreshTimer.Tick -= OnVideoViewRefreshTimerTick;
         _lifetimeCancellation.Cancel();
         CancelCurrentOperation();
         MediaProcessRegistry.TerminateAll();
@@ -1338,6 +1462,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
             ffprobe,
             new CompressionPlanner(),
             new TargetSizeCalculator(),
-            new OutputPathService());
+            new OutputPathService(),
+            new VmafQualityCalibrationService());
     }
 }

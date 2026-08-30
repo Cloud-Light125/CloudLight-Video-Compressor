@@ -4,7 +4,7 @@ Windows 桌面批量视频压缩工具，基于 C#、.NET 8、WPF、FFmpeg 与 f
 
 ## 已安装版本
 
-当前正式版本：`1.1.0`
+当前正式版本：`1.2.0`
 
 `CloudLight-Video-Compressor-Setup-x64-<version>.exe` 是 Windows x64、self-contained 的正式安装包。它将 .NET 8 Windows Desktop Runtime、应用程序和内置 FFmpeg/ffprobe 一起安装到：
 

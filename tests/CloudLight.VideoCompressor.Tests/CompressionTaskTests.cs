@@ -67,8 +67,9 @@ public sealed class CompressionTaskTests
     [Fact]
     public async Task SmartMode_ExcludesVideoThatPlannerSaysShouldBeSkipped()
     {
+        var item = MatchingItem(Media("already-reasonable.mp4", fileSizeBytes: 225L * 1024 * 1024, videoBitrate: 3_000_000));
         var session = await CreatePlanner().CreateSessionAsync(
-            [MatchingItem(Media("already-reasonable.mp4", fileSizeBytes: 225L * 1024 * 1024, videoBitrate: 3_000_000))],
+            [item],
             new AppSettings { CompressionMode = CompressionMode.SmartAutomatic },
             Path.GetTempPath(),
             FakeTools(),
@@ -77,6 +78,9 @@ public sealed class CompressionTaskTests
 
         Assert.Empty(session.Entries);
         Assert.Contains(session.PlanningNotes, note => note.Contains("智能跳过", StringComparison.Ordinal));
+        Assert.Equal(VideoTaskStatus.Skipped, item.Status);
+        Assert.Contains("智能跳过", item.StatusDetail);
+        Assert.NotNull(item.SmartDecision);
     }
 
     [Fact]
@@ -184,8 +188,55 @@ public sealed class CompressionTaskTests
 
         Assert.Equal(VideoEncoder.HevcNvenc, entry.Plan.Encoder);
         Assert.Equal(VideoEncoder.HevcQsv, entry.ActualEncoder);
+        Assert.Equal("NVIDIA NVENC · H.265", entry.PlannedEncoderDisplay);
+        Assert.Equal("实际编码方式：Intel Quick Sync · H.265", entry.ActualEncoderSummaryDisplay);
         Assert.Contains("Intel QSV", entry.FallbackReason);
         Assert.Equal(CompressionExecutionState.Completed, entry.ExecutionState);
+    }
+
+    [Fact]
+    public void ResultRejected_UsesDedicatedUserFacingStateAndMessage()
+    {
+        var entry = new CompressionTaskEntry(
+            Media("larger-result.mp4"),
+            new CompressionPlan(false, VideoEncoder.Libx265, CompressionMode.Crf, 28, "medium", null, null, null, AudioMode.Copy, 192, ".mp4", [], TargetCodec: VideoCodecKind.H265),
+            new ConditionEvaluationResult(ConditionResultState.AllAllowed, true, "全部允许", [], "全部允许"),
+            new CompressionPlanComparison([]));
+
+        entry.ApplyResult(new CompressionJobResult(
+            VideoTaskStatus.Skipped,
+            "已放弃结果：压缩后的文件未小于源文件。源文件已保留。",
+            SourceInfo: entry.Source,
+            FailureKind: CompressionFailureKind.ResultRejected,
+            PlannedEncoder: VideoEncoder.Libx265));
+
+        Assert.Equal("已放弃结果", entry.ExecutionStateDisplay);
+        Assert.True(entry.HasResultRejection);
+        Assert.Contains("未小于源文件", entry.FailureReasonDisplay);
+        Assert.Contains("源文件已保留", entry.FailureReasonDisplay);
+    }
+
+    [Fact]
+    public void ValidationFailure_UsesValidationLabelAndKeepsDiagnosticsAdvanced()
+    {
+        var entry = new CompressionTaskEntry(
+            Media("invalid-result.mp4"),
+            new CompressionPlan(false, VideoEncoder.Libx265, CompressionMode.Crf, 28, "medium", null, null, null, AudioMode.Copy, 192, ".mp4", [], TargetCodec: VideoCodecKind.H265),
+            new ConditionEvaluationResult(ConditionResultState.AllAllowed, true, "全部允许", [], "全部允许"),
+            new CompressionPlanComparison([]));
+
+        entry.ApplyResult(new CompressionJobResult(
+            VideoTaskStatus.Failed,
+            "输出文件未检测到有效视频流。ffprobe stderr tail",
+            SourceInfo: entry.Source,
+            FailureKind: CompressionFailureKind.ValidationFailed,
+            PlannedEncoder: VideoEncoder.Libx265));
+
+        Assert.Equal("验证失败", entry.ExecutionStateDisplay);
+        Assert.True(entry.IsValidationFailed);
+        Assert.Contains("验证失败", entry.FailureReasonDisplay);
+        Assert.Contains("有效视频流", entry.FailureReasonDisplay);
+        Assert.Contains("stderr tail", entry.DiagnosticErrorDisplay);
     }
 
     [Fact]

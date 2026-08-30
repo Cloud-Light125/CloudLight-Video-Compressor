@@ -21,10 +21,12 @@ public sealed class EncoderCapabilityDetector
     {
         var listed = await _ffmpegLocator.GetCapabilitiesAsync(tools, cancellationToken).ConfigureAwait(false);
         var capabilities = new List<EncoderCapability>();
+        var probeTime = DateTimeOffset.UtcNow;
         foreach (var definition in EncoderCatalog.Definitions)
         {
             cancellationToken.ThrowIfCancellationRequested();
             var present = listed.Encoders.Contains(definition.Encoder);
+            var strategy = EncoderStrategyCatalog.Get(definition.Encoder);
             if (!present)
             {
                 capabilities.Add(new EncoderCapability(
@@ -36,7 +38,14 @@ public sealed class EncoderCapabilityDetector
                     definition.IsHardware,
                     false,
                     false,
-                    $"当前 FFmpeg build 不包含 {definition.Id}"));
+                    $"当前 FFmpeg build 不包含 {definition.Id}")
+                {
+                    InitializationTestPassed = false,
+                    LastProbeTime = probeTime,
+                    SupportedRateControls = strategy.SupportedRateControls,
+                    SupportedPresets = strategy.SupportedPresets,
+                    SupportedPixelFormats = strategy.SupportedPixelFormats
+                });
                 DiagnosticLog.Write("encoder-detect", $"{definition.Id}: unavailable: FFmpeg encoder not present");
                 continue;
             }
@@ -53,7 +62,14 @@ public sealed class EncoderCapabilityDetector
                     false,
                     true,
                     true,
-                    null));
+                    null)
+                {
+                    InitializationTestPassed = true,
+                    LastProbeTime = probeTime,
+                    SupportedRateControls = strategy.SupportedRateControls,
+                    SupportedPresets = strategy.SupportedPresets,
+                    SupportedPixelFormats = strategy.SupportedPixelFormats
+                });
                 continue;
             }
 
@@ -81,7 +97,14 @@ public sealed class EncoderCapabilityDetector
                 true,
                 true,
                 smoke.IsUsable,
-                smoke.IsUsable ? null : smoke.Error ?? "硬件设备初始化失败");
+                smoke.IsUsable ? null : smoke.Error ?? "硬件设备初始化失败")
+            {
+                InitializationTestPassed = smoke.IsUsable,
+                LastProbeTime = probeTime,
+                SupportedRateControls = strategy.SupportedRateControls,
+                SupportedPresets = strategy.SupportedPresets,
+                SupportedPixelFormats = strategy.SupportedPixelFormats
+            };
             capabilities.Add(capability);
             DiagnosticLog.Write(
                 "encoder-detect",

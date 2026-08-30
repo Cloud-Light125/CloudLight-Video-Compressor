@@ -108,7 +108,15 @@ public sealed class CompressionPlanner
             maxVideoBitrate,
             bufferSize,
             smartDecision,
-            selection.FallbackEncoders);
+            selection.FallbackEncoders,
+            targetCodec)
+        {
+            InputInfo = media,
+            CompressionBenefitScore = smartDecision?.CompressionBenefitScore ?? 0,
+            SourceBitsPerPixel = smartDecision?.SourceBitsPerPixel,
+            SourceBitsPerPixelPerFrame = smartDecision?.SourceBitsPerPixelPerFrame,
+            TargetBitsPerPixelPerFrame = smartDecision?.TargetBitsPerPixelPerFrame
+        };
     }
 
     public SmartCompressionDecision CreateSmartDecision(
@@ -143,6 +151,7 @@ public sealed class CompressionPlanner
     private static VideoCodecKind LegacyCodec(VideoEncoder encoder) => encoder switch
     {
         VideoEncoder.Libx264 or VideoEncoder.H264Nvenc or VideoEncoder.H264Qsv or VideoEncoder.H264Amf => VideoCodecKind.H264,
+        VideoEncoder.LibsvtAv1 => VideoCodecKind.Av1,
         _ => VideoCodecKind.H265
     };
 
@@ -182,6 +191,20 @@ public sealed record CompressionPlan(
     long? TargetSizeBytes = null,
     string? Reason = null)
 {
+    /// <summary>
+    /// Stable identity for the dry-run snapshot. Fallbacks use <c>with</c> and
+    /// therefore retain this value; the execute stage never silently creates a
+    /// second plan.
+    /// </summary>
+    public Guid PlanId { get; init; } = Guid.NewGuid();
+
+    public VideoFileInfo? InputInfo { get; init; }
+    public VmafCalibrationResult? QualityCalibration { get; init; }
+    public double CompressionBenefitScore { get; init; }
+    public double? SourceBitsPerPixel { get; init; }
+    public double? SourceBitsPerPixelPerFrame { get; init; }
+    public double? TargetBitsPerPixelPerFrame { get; init; }
+
     public IReadOnlyList<VideoEncoder> EncoderCandidates =>
         [Encoder, .. (FallbackEncoders ?? Array.Empty<VideoEncoder>()).Where(candidate => candidate != Encoder).Take(3)];
 
@@ -210,6 +233,35 @@ public sealed record CompressionPlan(
 
     public VideoCodecKind EffectiveTargetCodec =>
         TargetCodec ?? EncoderCatalog.Get(Encoder).Codec;
+
+    public VideoCodec Codec => EffectiveTargetCodec switch
+    {
+        VideoCodecKind.H264 => VideoCodec.H264,
+        VideoCodecKind.Av1 => VideoCodec.Av1,
+        _ => VideoCodec.Hevc
+    };
+
+    public EncoderImplementation EncoderImplementation => (EncoderImplementation)Encoder;
+
+    public EncoderType EncoderType => EncoderCatalog.Get(Encoder).IsHardware
+        ? EncoderType.Hardware
+        : EncoderType.Software;
+
+    public RateControlMode EffectiveRateControlMode => Mode switch
+    {
+        CompressionMode.Crf when Encoder is VideoEncoder.H264Nvenc or VideoEncoder.HevcNvenc => RateControlMode.ConstantQuality,
+        CompressionMode.Crf when Encoder is VideoEncoder.H264Qsv or VideoEncoder.HevcQsv => RateControlMode.ConstantQuality,
+        CompressionMode.Crf when Encoder is VideoEncoder.H264Amf or VideoEncoder.HevcAmf => RateControlMode.ConstantQuantizer,
+        CompressionMode.Crf => RateControlMode.ConstantRateFactor,
+        CompressionMode.TargetSize when IsTwoPass => RateControlMode.TargetSizeTwoPass,
+        CompressionMode.TargetSize => RateControlMode.VariableBitrate,
+        _ => RateControlMode.AverageBitrate
+    };
+
+    public string DecisionReason => Reason ?? "未提供计划说明。";
+
+    public IReadOnlyList<string> BuildCommandPreview(string inputPath, string outputPath) =>
+        BuildArguments(inputPath, outputPath, firstPass: false, IsTwoPass ? "<pass-log>" : null);
 
     public string RateControlDisplay => RateControl ?? Mode switch
     {
@@ -315,109 +367,9 @@ public sealed record CompressionPlan(
     {
         yield return "-c:v";
         yield return FfmpegEncoderName(Encoder);
-
-        if (IsSoftwareEncoder(Encoder))
+        foreach (var argument in EncoderStrategyCatalog.Get(Encoder).BuildVideoArguments(this))
         {
-            if (Encoder is VideoEncoder.Libx264 or VideoEncoder.Libx265 or VideoEncoder.LibsvtAv1)
-            {
-                yield return "-preset";
-                yield return EncodingPreset;
-            }
-        }
-        else if (Encoder is VideoEncoder.H264Nvenc or VideoEncoder.HevcNvenc)
-        {
-            yield return "-preset";
-            yield return NvencPreset(EncodingPreset);
-        }
-        else if (Encoder is VideoEncoder.H264Qsv or VideoEncoder.HevcQsv)
-        {
-            yield return "-preset";
-            yield return QsvPreset(EncodingPreset);
-        }
-        else if (Encoder is VideoEncoder.H264Amf or VideoEncoder.HevcAmf)
-        {
-            yield return "-quality";
-            yield return "2";
-        }
-
-        if (Mode == CompressionMode.Crf)
-        {
-            foreach (var argument in BuildConstantQualityArguments())
-            {
-                yield return argument;
-            }
-        }
-        else
-        {
-            foreach (var argument in BuildBitrateArguments())
-            {
-                yield return argument;
-            }
-        }
-    }
-
-    private IEnumerable<string> BuildConstantQualityArguments()
-    {
-        var quality = Math.Clamp((int)Math.Round(Crf), 0, 51).ToString(CultureInfo.InvariantCulture);
-        switch (Encoder)
-        {
-            case VideoEncoder.Libx264:
-            case VideoEncoder.Libx265:
-            case VideoEncoder.LibsvtAv1:
-                yield return "-crf";
-                yield return quality;
-                break;
-            case VideoEncoder.H264Nvenc:
-            case VideoEncoder.HevcNvenc:
-                yield return "-rc";
-                yield return "vbr";
-                yield return "-cq";
-                yield return quality;
-                yield return "-b:v";
-                yield return "0";
-                break;
-            case VideoEncoder.H264Qsv:
-            case VideoEncoder.HevcQsv:
-                yield return "-global_quality";
-                yield return quality;
-                break;
-            case VideoEncoder.H264Amf:
-            case VideoEncoder.HevcAmf:
-                yield return "-rc";
-                yield return "cqp";
-                yield return "-qp_i";
-                yield return quality;
-                yield return "-qp_p";
-                yield return quality;
-                break;
-        }
-    }
-
-    private IEnumerable<string> BuildBitrateArguments()
-    {
-        var target = $"{Math.Max(10, (TargetVideoBitrateBps ?? 10_000) / 1_000)}k";
-        yield return "-b:v";
-        yield return target;
-
-        if (MaxVideoBitrateBps is > 0 && MaxVideoBitrateBps >= TargetVideoBitrateBps)
-        {
-            yield return "-maxrate";
-            yield return $"{Math.Max(10, MaxVideoBitrateBps.Value / 1_000)}k";
-        }
-        if (BufferSizeBps is > 0)
-        {
-            yield return "-bufsize";
-            yield return $"{Math.Max(10, BufferSizeBps.Value / 1_000)}k";
-        }
-        if (Encoder is VideoEncoder.H264Nvenc or VideoEncoder.HevcNvenc)
-        {
-            yield return "-rc";
-            yield return "vbr";
-        }
-        else if (Encoder is VideoEncoder.H264Amf or VideoEncoder.HevcAmf)
-        {
-            yield return "-rc";
-            yield return "vbr_peak";
+            yield return argument;
         }
     }
 
@@ -451,30 +403,6 @@ public sealed record CompressionPlan(
         yield return "-c:t";
         yield return "copy";
     }
-
-    private static string NvencPreset(string preset) => preset.ToLowerInvariant() switch
-    {
-        "ultrafast" or "superfast" or "veryfast" => "p1",
-        "faster" or "fast" => "p3",
-        "slow" => "p5",
-        "slower" => "p6",
-        "veryslow" => "p7",
-        _ => "p4"
-    };
-
-    private static string QsvPreset(string preset) => preset.ToLowerInvariant() switch
-    {
-        "ultrafast" => "7",
-        "superfast" => "6",
-        "veryfast" => "5",
-        "faster" or "fast" => "4",
-        "slow" => "2",
-        "slower" or "veryslow" => "1",
-        _ => "3"
-    };
-
-    private static bool IsSoftwareEncoder(VideoEncoder encoder) =>
-        encoder is VideoEncoder.Libx264 or VideoEncoder.Libx265 or VideoEncoder.LibsvtAv1;
 
     public static string FfmpegEncoderName(VideoEncoder encoder) => encoder switch
     {

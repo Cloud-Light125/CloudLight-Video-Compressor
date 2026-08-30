@@ -28,6 +28,7 @@ public sealed class RuleEngine
 
         bool? aggregate = null;
         var details = new List<string>(activeRules.Count);
+        var ruleResults = new List<ConditionRuleResult>(activeRules.Count);
         var hasUnavailableValue = false;
         foreach (var rule in activeRules)
         {
@@ -35,6 +36,7 @@ public sealed class RuleEngine
             hasUnavailableValue |= !check.IsAvailable;
             var join = aggregate is null ? string.Empty : $"{JoinText(rule.JoinWithPrevious)} ";
             details.Add(join + check.Message);
+            ruleResults.Add(check.Result);
             aggregate = aggregate is null
                 ? check.IsMatch
                 : rule.JoinWithPrevious == RuleJoin.And
@@ -65,7 +67,7 @@ public sealed class RuleEngine
             _ => "已跳过：不符合压缩条件。"
         };
         var tooltip = string.Join(Environment.NewLine, details) + Environment.NewLine + $"最终结果：{resultText}";
-        return new ConditionEvaluationResult(state, isMatch, summary, details, tooltip);
+        return new ConditionEvaluationResult(state, isMatch, summary, details, tooltip, ruleResults);
     }
 
     private static RuleCheck EvaluateRule(VideoFileInfo media, CompressionRule rule)
@@ -82,7 +84,11 @@ public sealed class RuleEngine
             RuleField.VideoCodec => CompareText(media.VideoCodec, rule, "视频编码"),
             RuleField.FileName => CompareText(media.FileName, rule, "文件名"),
             RuleField.Extension => CompareText(media.Extension, rule, "扩展名"),
-            _ => new RuleCheck(false, false, "未知条件字段。")
+            _ => new RuleCheck(
+                false,
+                false,
+                "未知条件字段。",
+                new ConditionRuleResult(rule.Field, "不可用", rule.Comparison, rule.GetComparisonValue(), string.Empty, false, false, "未知条件字段。"))
         };
     }
 
@@ -91,11 +97,20 @@ public sealed class RuleEngine
         var comparisonValue = rule.GetComparisonValue();
         if (!parser(comparisonValue, out var expected, out var error))
         {
-            return new RuleCheck(false, false, $"{field}条件无效：{error}");
+            return new RuleCheck(
+                false,
+                false,
+                $"{field}条件无效：{error}",
+                new ConditionRuleResult(rule.Field, FormatValue(actual, unit), rule.Comparison, comparisonValue, unit, false, false, $"{field}条件无效：{error}"));
         }
 
         var matched = Compare(actual, expected, rule.Comparison);
-        return new RuleCheck(matched, true, NumericMessage(field, actual, expected, unit, rule.Comparison, matched));
+        var message = NumericMessage(field, actual, expected, unit, rule.Comparison, matched);
+        return new RuleCheck(
+            matched,
+            true,
+            message,
+            new ConditionRuleResult(rule.Field, FormatValue(actual, unit), rule.Comparison, FormatValue(expected, unit), unit, matched, true, message));
     }
 
     private static RuleCheck CompareOptionalNumeric<T>(T? actual, CompressionRule rule, string field, string unit, ValueParserDelegate parser)
@@ -103,7 +118,12 @@ public sealed class RuleEngine
     {
         if (actual is null)
         {
-            return new RuleCheck(false, false, $"{field}不可用，无法判断条件 {OperatorText(rule.Comparison)} {rule.GetComparisonValue()}。 ");
+            var message = $"{field}不可用，无法判断条件 {OperatorText(rule.Comparison)} {rule.GetComparisonValue()}。 ";
+            return new RuleCheck(
+                false,
+                false,
+                message,
+                new ConditionRuleResult(rule.Field, "不可用", rule.Comparison, rule.GetComparisonValue(), unit, false, false, message));
         }
 
         return CompareNumeric(Convert.ToDouble(actual.Value), rule, field, unit, parser);
@@ -113,18 +133,32 @@ public sealed class RuleEngine
     {
         if (actual is null)
         {
-            return new RuleCheck(false, false, $"{field}不可用，无法判断条件。 ");
+            var message = $"{field}不可用，无法判断条件。 ";
+            return new RuleCheck(
+                false,
+                false,
+                message,
+                new ConditionRuleResult(rule.Field, "不可用", rule.Comparison, rule.Value, string.Empty, false, false, message));
         }
 
         if (rule.Comparison is not RuleComparison.Equal and not RuleComparison.NotEqual)
         {
-            return new RuleCheck(false, false, $"{field}仅支持 = 或 != 比较。 ");
+            var message = $"{field}仅支持 = 或 != 比较。 ";
+            return new RuleCheck(
+                false,
+                false,
+                message,
+                new ConditionRuleResult(rule.Field, actual, rule.Comparison, rule.Value, string.Empty, false, false, message));
         }
 
         var equal = string.Equals(actual.Trim(), rule.Value.Trim(), StringComparison.OrdinalIgnoreCase);
         var matched = rule.Comparison == RuleComparison.Equal ? equal : !equal;
-        return new RuleCheck(matched, true,
-            $"{(matched ? "✓" : "✗")} {field}“{actual}” {OperatorText(rule.Comparison)} “{rule.Value}”");
+        var messageText = $"{(matched ? "✓" : "✗")} {field}“{actual}” {OperatorText(rule.Comparison)} “{rule.Value}”";
+        return new RuleCheck(
+            matched,
+            true,
+            messageText,
+            new ConditionRuleResult(rule.Field, actual, rule.Comparison, rule.Value, string.Empty, matched, true, messageText));
     }
 
     private static bool ParseFileSize(string value, out double parsed, out string error)
@@ -164,14 +198,14 @@ public sealed class RuleEngine
 
     private static string NumericMessage(string field, double actual, double expected, string unit, RuleComparison comparison, bool matched)
     {
-        var actualDisplay = unit == "字节" ? DisplayFormat.FileSize((long)actual) :
-            unit == "bps" ? $"{actual / 1_000_000d:0.##} Mbps" :
-            $"{actual:0.###}{(string.IsNullOrEmpty(unit) ? string.Empty : $" {unit}")}";
-        var expectedDisplay = unit == "字节" ? DisplayFormat.FileSize((long)expected) :
-            unit == "bps" ? $"{expected / 1_000_000d:0.##} Mbps" :
-            $"{expected:0.###}{(string.IsNullOrEmpty(unit) ? string.Empty : $" {unit}")}";
+        var actualDisplay = FormatValue(actual, unit);
+        var expectedDisplay = FormatValue(expected, unit);
         return $"{(matched ? "✓" : "✗")} {field} {actualDisplay} {OperatorText(comparison)} {expectedDisplay}";
     }
+
+    private static string FormatValue(double value, string unit) => unit == "字节" ? DisplayFormat.FileSize((long)value) :
+        unit == "bps" ? $"{value / 1_000_000d:0.##} Mbps" :
+        $"{value:0.###}{(string.IsNullOrEmpty(unit) ? string.Empty : $" {unit}")}";
 
     private static string OperatorText(RuleComparison comparison) => comparison switch
     {
@@ -188,5 +222,5 @@ public sealed class RuleEngine
 
     private delegate bool ValueParserDelegate(string value, out double parsed, out string error);
 
-    private sealed record RuleCheck(bool IsMatch, bool IsAvailable, string Message);
+    private sealed record RuleCheck(bool IsMatch, bool IsAvailable, string Message, ConditionRuleResult Result);
 }

@@ -1,5 +1,15 @@
 namespace CloudLight.VideoCompressor.Models;
 
+public sealed record ConditionRuleResult(
+    RuleField Field,
+    string ActualValue,
+    RuleComparison Operator,
+    string ExpectedValue,
+    string Unit,
+    bool Passed,
+    bool IsAvailable,
+    string Explanation);
+
 /// <summary>
 /// The cached result of evaluating the current compression rules against a video.
 /// It is deliberately separate from <see cref="VideoTaskStatus"/>: a video can be
@@ -11,14 +21,18 @@ public sealed record ConditionEvaluationResult(
     bool IsMatch,
     string Summary,
     IReadOnlyList<string> Details,
-    string Tooltip)
+    string Tooltip,
+    IReadOnlyList<ConditionRuleResult>? RuleResults = null)
 {
     public bool IsDetermined => State != ConditionResultState.Pending;
+
+    public IReadOnlyList<ConditionRuleResult> Rules => RuleResults ?? Array.Empty<ConditionRuleResult>();
 
     public static ConditionEvaluationResult Pending { get; } = new(
         ConditionResultState.Pending,
         false,
         "待判断",
         [],
-        "尚未根据当前条件判断。扫描或开始处理后会使用已有媒体信息计算。 ");
+        "尚未根据当前条件判断。扫描或开始处理后会使用已有媒体信息计算。 ",
+        []);
 }

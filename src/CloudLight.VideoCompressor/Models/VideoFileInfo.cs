@@ -20,6 +20,25 @@ public sealed class VideoFileInfo
 
     public bool HasProbeData => DurationSeconds is not null || VideoCodec is not null || Width is not null;
 
+    /// <summary>Number of luma pixels in one frame when probe data is available.</summary>
+    public long? PixelCount => Width is > 0 && Height is > 0
+        ? (long)Width.Value * Height.Value
+        : null;
+
+    /// <summary>
+    /// Source bits per pixel per frame. This is a planner signal, not a visual
+    /// quality score; motion, grain and scene complexity are not represented by
+    /// this scalar.
+    /// </summary>
+    public double? BitsPerPixelPerFrame => PixelCount is > 0 && FrameRate is > 0 && VideoBitrateBps is > 0
+        ? VideoBitrateBps.Value / (double)(PixelCount.Value * FrameRate.Value)
+        : null;
+
+    /// <summary>Bits per pixel per second, useful when FPS is unavailable.</summary>
+    public double? BitsPerPixelPerSecond => PixelCount is > 0 && VideoBitrateBps is > 0
+        ? VideoBitrateBps.Value / (double)PixelCount.Value
+        : null;
+
     public static VideoFileInfo FromFile(string path)
     {
         var file = new FileInfo(path);
