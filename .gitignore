@@ -1,0 +1,12 @@
+[Bb]in/
+[Oo]bj/
+.vs/
+
+artifacts/
+
+*.user
+*.suo
+*.log
+**/settings.json
+**/logs/
+**/.clvc-*

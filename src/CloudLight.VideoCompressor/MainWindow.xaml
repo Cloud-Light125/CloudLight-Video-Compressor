@@ -1,0 +1,1219 @@
+<Window x:Class="CloudLight.VideoCompressor.MainWindow"
+        x:Name="Root"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:infrastructure="clr-namespace:CloudLight.VideoCompressor.Infrastructure"
+        xmlns:models="clr-namespace:CloudLight.VideoCompressor.Models"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        mc:Ignorable="d"
+        Title="CloudLight Video Compressor"
+        Width="1360"
+        Height="820"
+        MinWidth="1080"
+        MinHeight="640"
+        WindowStartupLocation="CenterScreen"
+        Background="#F4F6F8"
+        FontFamily="Segoe UI, Microsoft YaHei UI"
+        FontSize="13">
+    <Window.Resources>
+        <infrastructure:EnumDescriptionConverter x:Key="EnumDescriptionConverter" />
+        <SolidColorBrush x:Key="PageBackgroundBrush" Color="#F4F6F8" />
+        <SolidColorBrush x:Key="SurfaceBrush" Color="#FFFFFF" />
+        <SolidColorBrush x:Key="BorderBrush" Color="#D8DEE7" />
+        <SolidColorBrush x:Key="MutedTextBrush" Color="#687384" />
+        <SolidColorBrush x:Key="AccentBrush" Color="#2563EB" />
+        <SolidColorBrush x:Key="AccentDarkBrush" Color="#1D4ED8" />
+        <SolidColorBrush x:Key="DangerBrush" Color="#B42318" />
+
+        <Style x:Key="BaseButtonStyle" TargetType="Button">
+            <Setter Property="Padding" Value="14,7" />
+            <Setter Property="Margin" Value="4,0,0,0" />
+            <Setter Property="MinHeight" Value="32" />
+            <Setter Property="VerticalContentAlignment" Value="Center" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}" />
+            <Setter Property="Background" Value="{StaticResource SurfaceBrush}" />
+            <Setter Property="Foreground" Value="#273142" />
+            <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                CornerRadius="5"
+                                Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
+                                              VerticalAlignment="{TemplateBinding VerticalContentAlignment}" />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter Property="Background" Value="#EEF4FF" />
+                                <Setter Property="BorderBrush" Value="#9BB8F5" />
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter Property="Background" Value="#DCE8FF" />
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter Property="Opacity" Value="0.48" />
+                                <Setter Property="Cursor" Value="Arrow" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="PrimaryButtonStyle" TargetType="Button" BasedOn="{StaticResource BaseButtonStyle}">
+            <Setter Property="Background" Value="{StaticResource AccentBrush}" />
+            <Setter Property="Foreground" Value="White" />
+            <Setter Property="BorderBrush" Value="{StaticResource AccentBrush}" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+            <Style.Triggers>
+                <Trigger Property="IsMouseOver" Value="True">
+                    <Setter Property="Background" Value="{StaticResource AccentDarkBrush}" />
+                    <Setter Property="BorderBrush" Value="{StaticResource AccentDarkBrush}" />
+                </Trigger>
+                <DataTrigger Binding="{Binding IsBusy}" Value="True">
+                    <Setter Property="IsEnabled" Value="False" />
+                </DataTrigger>
+            </Style.Triggers>
+        </Style>
+
+        <Style x:Key="DangerButtonStyle" TargetType="Button" BasedOn="{StaticResource BaseButtonStyle}">
+            <Setter Property="Foreground" Value="{StaticResource DangerBrush}" />
+            <Setter Property="BorderBrush" Value="#E9A6A0" />
+        </Style>
+
+        <Style x:Key="ActionButtonStyle" TargetType="Button" BasedOn="{StaticResource BaseButtonStyle}">
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding IsBusy}" Value="True">
+                    <Setter Property="IsEnabled" Value="False" />
+                </DataTrigger>
+            </Style.Triggers>
+        </Style>
+
+        <Style x:Key="FieldLabelStyle" TargetType="TextBlock">
+            <Setter Property="Foreground" Value="#354052" />
+            <Setter Property="VerticalAlignment" Value="Center" />
+            <Setter Property="Margin" Value="0,0,8,0" />
+        </Style>
+
+        <Style x:Key="InputStyle" TargetType="TextBox">
+            <Setter Property="MinHeight" Value="30" />
+            <Setter Property="Padding" Value="8,4" />
+            <Setter Property="VerticalContentAlignment" Value="Center" />
+            <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}" />
+            <Setter Property="Background" Value="White" />
+        </Style>
+
+        <Style x:Key="SelectStyle" TargetType="ComboBox">
+            <Setter Property="MinHeight" Value="30" />
+            <Setter Property="Padding" Value="6,2" />
+            <Setter Property="VerticalContentAlignment" Value="Center" />
+            <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}" />
+            <Setter Property="Background" Value="White" />
+            <Setter Property="ItemTemplate">
+                <Setter.Value>
+                    <DataTemplate>
+                        <TextBlock Text="{Binding Converter={StaticResource EnumDescriptionConverter}}" />
+                    </DataTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="SectionGroupStyle" TargetType="GroupBox">
+            <Setter Property="Margin" Value="0,0,0,12" />
+            <Setter Property="Padding" Value="10,8,10,10" />
+            <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}" />
+            <Setter Property="Background" Value="{StaticResource SurfaceBrush}" />
+        </Style>
+
+        <Style x:Key="DataGridCellStyle" TargetType="DataGridCell">
+            <Setter Property="Padding" Value="7,4" />
+            <Setter Property="BorderBrush" Value="#EDF0F4" />
+            <Setter Property="VerticalContentAlignment" Value="Center" />
+        </Style>
+
+        <Style x:Key="DataGridHeaderStyle" TargetType="DataGridColumnHeader">
+            <Setter Property="Padding" Value="8,7" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+            <Setter Property="Foreground" Value="#354052" />
+            <Setter Property="Background" Value="#EEF1F5" />
+            <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}" />
+            <Setter Property="BorderThickness" Value="0,0,1,1" />
+        </Style>
+
+        <Style x:Key="TabItemStyle" TargetType="TabItem">
+            <Setter Property="Padding" Value="8,7" />
+            <Setter Property="Margin" Value="1" />
+            <Setter Property="Foreground" Value="#4B5565" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+        </Style>
+
+        <ItemsPanelTemplate x:Key="SettingsTabItemsPanel">
+            <UniformGrid Rows="2" Columns="3" />
+        </ItemsPanelTemplate>
+
+        <Style x:Key="VisibleForCrfMode" TargetType="{x:Type FrameworkElement}">
+            <Setter Property="Visibility" Value="Collapsed" />
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding Settings.CompressionMode}" Value="{x:Static models:CompressionMode.Crf}">
+                    <Setter Property="Visibility" Value="Visible" />
+                </DataTrigger>
+            </Style.Triggers>
+        </Style>
+        <Style x:Key="VisibleForBitrateMode" TargetType="{x:Type FrameworkElement}">
+            <Setter Property="Visibility" Value="Collapsed" />
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding Settings.CompressionMode}" Value="{x:Static models:CompressionMode.Bitrate}">
+                    <Setter Property="Visibility" Value="Visible" />
+                </DataTrigger>
+            </Style.Triggers>
+        </Style>
+        <Style x:Key="VisibleForTargetSizeMode" TargetType="{x:Type FrameworkElement}">
+            <Setter Property="Visibility" Value="Collapsed" />
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding Settings.CompressionMode}" Value="{x:Static models:CompressionMode.TargetSize}">
+                    <Setter Property="Visibility" Value="Visible" />
+                </DataTrigger>
+            </Style.Triggers>
+        </Style>
+        <Style x:Key="VisibleForSmartMode" TargetType="{x:Type FrameworkElement}">
+            <Setter Property="Visibility" Value="Collapsed" />
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding Settings.CompressionMode}" Value="{x:Static models:CompressionMode.SmartAutomatic}">
+                    <Setter Property="Visibility" Value="Visible" />
+                </DataTrigger>
+            </Style.Triggers>
+        </Style>
+        <Style x:Key="VisibleForCustomResolution" TargetType="{x:Type FrameworkElement}">
+            <Setter Property="Visibility" Value="Collapsed" />
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding Settings.ResolutionLimit}" Value="{x:Static models:ResolutionLimitPreset.Custom}">
+                    <Setter Property="Visibility" Value="Visible" />
+                </DataTrigger>
+            </Style.Triggers>
+        </Style>
+        <Style x:Key="CustomResolutionLabelStyle" TargetType="TextBlock" BasedOn="{StaticResource FieldLabelStyle}">
+            <Setter Property="Visibility" Value="Collapsed" />
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding Settings.ResolutionLimit}" Value="{x:Static models:ResolutionLimitPreset.Custom}">
+                    <Setter Property="Visibility" Value="Visible" />
+                </DataTrigger>
+            </Style.Triggers>
+        </Style>
+        <Style x:Key="VisibleForCustomFps" TargetType="{x:Type FrameworkElement}">
+            <Setter Property="Visibility" Value="Collapsed" />
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding Settings.FpsLimit}" Value="{x:Static models:FpsLimitPreset.Custom}">
+                    <Setter Property="Visibility" Value="Visible" />
+                </DataTrigger>
+            </Style.Triggers>
+        </Style>
+        <Style x:Key="CustomFpsInputStyle" TargetType="TextBox" BasedOn="{StaticResource InputStyle}">
+            <Setter Property="Visibility" Value="Collapsed" />
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding Settings.FpsLimit}" Value="{x:Static models:FpsLimitPreset.Custom}">
+                    <Setter Property="Visibility" Value="Visible" />
+                </DataTrigger>
+            </Style.Triggers>
+        </Style>
+        <Style x:Key="VisibleForAac" TargetType="{x:Type FrameworkElement}">
+            <Setter Property="Visibility" Value="Collapsed" />
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding Settings.AudioMode}" Value="{x:Static models:AudioMode.Aac}">
+                    <Setter Property="Visibility" Value="Visible" />
+                </DataTrigger>
+            </Style.Triggers>
+        </Style>
+        <Style x:Key="VisibleForSameDirectory" TargetType="{x:Type FrameworkElement}">
+            <Setter Property="Visibility" Value="Collapsed" />
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding Settings.OutputLocation}" Value="{x:Static models:OutputLocationMode.SameDirectory}">
+                    <Setter Property="Visibility" Value="Visible" />
+                </DataTrigger>
+            </Style.Triggers>
+        </Style>
+        <Style x:Key="VisibleForSelectedDirectory" TargetType="{x:Type FrameworkElement}">
+            <Setter Property="Visibility" Value="Collapsed" />
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding Settings.OutputLocation}" Value="{x:Static models:OutputLocationMode.SelectedDirectory}">
+                    <Setter Property="Visibility" Value="Visible" />
+                </DataTrigger>
+            </Style.Triggers>
+        </Style>
+        <Style x:Key="VisibleForChildDirectory" TargetType="{x:Type FrameworkElement}">
+            <Setter Property="Visibility" Value="Collapsed" />
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding Settings.OutputLocation}" Value="{x:Static models:OutputLocationMode.ChildDirectory}">
+                    <Setter Property="Visibility" Value="Visible" />
+                </DataTrigger>
+            </Style.Triggers>
+        </Style>
+        <Style x:Key="VisibleWhenNoRules" TargetType="{x:Type FrameworkElement}">
+            <Setter Property="Visibility" Value="Collapsed" />
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding HasRules}" Value="False">
+                    <Setter Property="Visibility" Value="Visible" />
+                </DataTrigger>
+            </Style.Triggers>
+        </Style>
+        <Style x:Key="VisibleWhenRulesExist" TargetType="{x:Type FrameworkElement}">
+            <Setter Property="Visibility" Value="Collapsed" />
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding HasRules}" Value="True">
+                    <Setter Property="Visibility" Value="Visible" />
+                </DataTrigger>
+            </Style.Triggers>
+        </Style>
+        <Style x:Key="VisibleWhenRulesAreDisabled" TargetType="{x:Type FrameworkElement}">
+            <Setter Property="Visibility" Value="Collapsed" />
+            <Style.Triggers>
+                <MultiDataTrigger>
+                    <MultiDataTrigger.Conditions>
+                        <Condition Binding="{Binding HasRules}" Value="True" />
+                        <Condition Binding="{Binding HasEnabledRules}" Value="False" />
+                    </MultiDataTrigger.Conditions>
+                    <Setter Property="Visibility" Value="Visible" />
+                </MultiDataTrigger>
+            </Style.Triggers>
+        </Style>
+    </Window.Resources>
+
+    <Grid Background="{StaticResource PageBackgroundBrush}">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <Border Grid.Row="0"
+                Margin="14,14,14,8"
+                Padding="14,12"
+                Background="{StaticResource SurfaceBrush}"
+                BorderBrush="{StaticResource BorderBrush}"
+                BorderThickness="1"
+                CornerRadius="7">
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+
+                <TextBlock Grid.Row="0" Grid.Column="0"
+                           Text="目录"
+                           FontWeight="SemiBold"
+                           VerticalAlignment="Center"
+                           Margin="0,0,10,0" />
+                <TextBox Grid.Row="0" Grid.Column="1"
+                         Style="{StaticResource InputStyle}"
+                         Text="{Binding DirectoryPath, UpdateSourceTrigger=PropertyChanged}"
+                         ToolTip="选择需要扫描或处理的视频目录" />
+                <Button Grid.Row="0" Grid.Column="2"
+                        Content="浏览…"
+                        Command="{Binding BrowseFolderCommand}"
+                        Style="{StaticResource ActionButtonStyle}" />
+                <Button Grid.Row="0" Grid.Column="3"
+                        Content="扫描视频"
+                        Command="{Binding ScanCommand}"
+                        Style="{StaticResource ActionButtonStyle}" />
+                <Button Grid.Row="0" Grid.Column="4"
+                        Content="直接处理目录"
+                        Command="{Binding DirectProcessCommand}"
+                        Style="{StaticResource ActionButtonStyle}"
+                        ToolTip="逐个发现视频、按需 ffprobe、判断规则后压缩或跳过" />
+                <Button Grid.Row="0" Grid.Column="5"
+                        Content="压缩已选视频"
+                        Command="{Binding StartCompressionCommand}"
+                        Style="{StaticResource PrimaryButtonStyle}"
+                        ToolTip="只处理列表中已勾选的视频" />
+
+                <CheckBox Grid.Row="1" Grid.Column="1"
+                          Margin="0,9,0,0"
+                          Content="递归扫描子目录"
+                          IsChecked="{Binding Settings.RecursiveScan, Mode=TwoWay}" />
+                <TextBlock Grid.Row="1" Grid.Column="2" Grid.ColumnSpan="4"
+                           Margin="10,9,0,0"
+                           Foreground="{StaticResource MutedTextBrush}"
+                           Text="支持 MP4、MKV、MOV、AVI、WebM、TS、M2TS 等常见视频格式" />
+            </Grid>
+        </Border>
+
+        <Border Grid.Row="1"
+                Margin="14,0,14,8"
+                Padding="12,8"
+                Background="#EAF2FF"
+                BorderBrush="#C9DAFF"
+                BorderThickness="1"
+                CornerRadius="6">
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <TextBlock Grid.Column="0" Text="FFmpeg：" FontWeight="SemiBold" Foreground="#1E3A8A" />
+                <TextBlock Grid.Column="1"
+                           Margin="8,0,20,0"
+                           Foreground="#334A7D"
+                           Text="{Binding FfmpegStatus}"
+                           ToolTip="{Binding FfmpegToolTip}"
+                           TextTrimming="CharacterEllipsis" />
+                <TextBlock Grid.Column="2" Text="状态：" Foreground="#1E3A8A" />
+                <TextBlock Grid.Column="3"
+                           Margin="4,0,16,0"
+                           Foreground="#334A7D"
+                           Text="{Binding StatusMessage}"
+                           TextTrimming="CharacterEllipsis" />
+                <Button Grid.Column="4"
+                        Content="停止"
+                        Command="{Binding StopCommand}"
+                        IsEnabled="{Binding IsBusy}"
+                        Style="{StaticResource DangerButtonStyle}"
+                         Padding="15,4"
+                         MinHeight="28" />
+                <TextBlock Grid.Row="1"
+                           Grid.Column="0"
+                           Grid.ColumnSpan="5"
+                           Margin="0,8,0,0"
+                           Foreground="#334A7D"
+                           Text="{Binding QueueSummary}"
+                           TextTrimming="CharacterEllipsis" />
+                <TextBlock Grid.Row="2"
+                           Grid.Column="0"
+                           Grid.ColumnSpan="5"
+                           Margin="0,8,0,0"
+                           Foreground="#334A7D"
+                           Text="主页面负责扫描、条件判断与参数设置；确认后的 FFmpeg 执行进度、验证和结果会在“压缩任务”页面显示。"
+                           TextTrimming="CharacterEllipsis" />
+            </Grid>
+        </Border>
+
+        <Grid Grid.Row="2" Margin="14,0,14,14">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="2*" MinWidth="620" />
+                <ColumnDefinition Width="6" />
+                <ColumnDefinition Width="*" MinWidth="340" />
+            </Grid.ColumnDefinitions>
+
+            <Border Grid.Column="0"
+                    Background="{StaticResource SurfaceBrush}"
+                    BorderBrush="{StaticResource BorderBrush}"
+                    BorderThickness="1"
+                    CornerRadius="7">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="*" />
+                        <RowDefinition Height="Auto" />
+                    </Grid.RowDefinitions>
+
+                    <Grid Grid.Row="0" Margin="12,10,12,8">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Grid.Column="0" Orientation="Horizontal">
+                            <TextBlock Text="视频队列" FontSize="16" FontWeight="SemiBold" />
+                            <TextBlock Margin="8,3,0,0" Foreground="{StaticResource MutedTextBrush}" Text="（可点击列标题排序）" />
+                        </StackPanel>
+                        <StackPanel Grid.Column="1" Orientation="Horizontal" Margin="8,0,0,0">
+                            <TextBlock Text="筛选" VerticalAlignment="Center" Foreground="{StaticResource MutedTextBrush}" />
+                            <ComboBox Width="112"
+                                      Margin="5,0,0,0"
+                                      Style="{StaticResource SelectStyle}"
+                                      ItemsSource="{Binding QueueFilters}"
+                                      SelectedItem="{Binding SelectedQueueFilter, Mode=TwoWay}" />
+                        </StackPanel>
+                        <Button Grid.Column="2"
+                                Content="全选"
+                                Command="{Binding SelectAllCommand}"
+                                Style="{StaticResource ActionButtonStyle}"
+                                Padding="12,5" />
+                        <Button Grid.Column="3"
+                                Content="取消选择"
+                                Command="{Binding DeselectAllCommand}"
+                                Style="{StaticResource ActionButtonStyle}"
+                                Padding="12,5" />
+                    </Grid>
+
+                    <DataGrid Grid.Row="1"
+                              ItemsSource="{Binding VideoView}"
+                              AutoGenerateColumns="False"
+                              CanUserAddRows="False"
+                              CanUserDeleteRows="False"
+                              CanUserReorderColumns="True"
+                              CanUserResizeColumns="True"
+                              CanUserSortColumns="True"
+                              EnableRowVirtualization="True"
+                              EnableColumnVirtualization="True"
+                              IsReadOnly="False"
+                              SelectionMode="Extended"
+                              SelectionUnit="FullRow"
+                              HeadersVisibility="Column"
+                              GridLinesVisibility="Horizontal"
+                              HorizontalGridLinesBrush="#EDF0F4"
+                              RowHeaderWidth="0"
+                              BorderThickness="0"
+                              Background="White"
+                              CellStyle="{StaticResource DataGridCellStyle}"
+                              ColumnHeaderStyle="{StaticResource DataGridHeaderStyle}"
+                              ScrollViewer.HorizontalScrollBarVisibility="Auto"
+                              ScrollViewer.VerticalScrollBarVisibility="Auto">
+                        <DataGrid.Columns>
+                            <DataGridCheckBoxColumn Header="选择"
+                                                    Width="52"
+                                                    IsReadOnly="False"
+                                                    Binding="{Binding IsSelected, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                            <DataGridTextColumn Header="文件名"
+                                                Width="180"
+                                                IsReadOnly="True"
+                                                SortMemberPath="FileName"
+                                                Binding="{Binding FileName}">
+                                <DataGridTextColumn.CellStyle>
+                                    <Style TargetType="DataGridCell" BasedOn="{StaticResource DataGridCellStyle}">
+                                        <Setter Property="ToolTip" Value="{Binding FullPath}" />
+                                    </Style>
+                                </DataGridTextColumn.CellStyle>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Header="大小"
+                                                Width="88"
+                                                IsReadOnly="True"
+                                                SortMemberPath="FileSizeBytes"
+                                                Binding="{Binding SizeDisplay}" />
+                            <DataGridTextColumn Header="时长"
+                                                Width="74"
+                                                IsReadOnly="True"
+                                                SortMemberPath="DurationSecondsSort"
+                                                Binding="{Binding DurationDisplay}" />
+                            <DataGridTextColumn Header="分辨率"
+                                                Width="102"
+                                                IsReadOnly="True"
+                                                SortMemberPath="ResolutionPixelsSort"
+                                                Binding="{Binding ResolutionDisplay}" />
+                            <DataGridTextColumn Header="FPS"
+                                                Width="66"
+                                                IsReadOnly="True"
+                                                SortMemberPath="FrameRateSort"
+                                                Binding="{Binding FpsDisplay}" />
+                            <DataGridTextColumn Header="视频码率"
+                                                Width="95"
+                                                IsReadOnly="True"
+                                                SortMemberPath="VideoBitrateBpsSort"
+                                                Binding="{Binding VideoBitrateDisplay}" />
+                            <DataGridTextColumn Header="总码率"
+                                                Width="95"
+                                                IsReadOnly="True"
+                                                SortMemberPath="TotalBitrateBpsSort"
+                                                Binding="{Binding TotalBitrateDisplay}" />
+                            <DataGridTextColumn Header="编码"
+                                                Width="90"
+                                                IsReadOnly="True"
+                                                SortMemberPath="VideoCodecDisplay"
+                                                Binding="{Binding VideoCodecDisplay}" />
+                            <DataGridTextColumn Header="音频"
+                                                Width="110"
+                                                IsReadOnly="True"
+                                                SortMemberPath="AudioDisplay"
+                                                Binding="{Binding AudioDisplay}" />
+                            <DataGridTextColumn Header="条件"
+                                                Width="86"
+                                                IsReadOnly="True"
+                                                SortMemberPath="ConditionStateSort"
+                                                Binding="{Binding ConditionDisplay}">
+                                <DataGridTextColumn.CellStyle>
+                                    <Style TargetType="DataGridCell" BasedOn="{StaticResource DataGridCellStyle}">
+                                        <Setter Property="ToolTip" Value="{Binding ConditionTooltip}" />
+                                    </Style>
+                                </DataGridTextColumn.CellStyle>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Header="状态"
+                                                Width="110"
+                                                IsReadOnly="True"
+                                                SortMemberPath="Status"
+                                                Binding="{Binding StatusDisplay}">
+                                <DataGridTextColumn.CellStyle>
+                                    <Style TargetType="DataGridCell" BasedOn="{StaticResource DataGridCellStyle}">
+                                        <Setter Property="ToolTip" Value="{Binding StatusTooltip}" />
+                                    </Style>
+                                </DataGridTextColumn.CellStyle>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Header="智能决策"
+                                                Width="92"
+                                                IsReadOnly="True"
+                                                SortMemberPath="SmartDecisionDisplay"
+                                                Binding="{Binding SmartDecisionDisplay}">
+                                <DataGridTextColumn.CellStyle>
+                                    <Style TargetType="DataGridCell" BasedOn="{StaticResource DataGridCellStyle}">
+                                        <Setter Property="ToolTip" Value="{Binding SmartDecisionTooltip}" />
+                                    </Style>
+                                </DataGridTextColumn.CellStyle>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Header="实际编码器"
+                                                Width="155"
+                                                IsReadOnly="True"
+                                                SortMemberPath="EncoderDisplay"
+                                                Binding="{Binding EncoderDisplay}" />
+                            <DataGridTemplateColumn Header="进度" Width="130" IsReadOnly="True" SortMemberPath="ProgressPercent">
+                                <DataGridTemplateColumn.CellTemplate>
+                                    <DataTemplate>
+                                        <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                                            <ProgressBar Width="74"
+                                                         Height="8"
+                                                         Margin="0,0,6,0"
+                                                         Minimum="0"
+                                                         Maximum="100"
+                                                         Value="{Binding ProgressPercent, Mode=OneWay}" />
+                                            <TextBlock Text="{Binding ProgressDisplay}" Foreground="#4B5565" />
+                                        </StackPanel>
+                                    </DataTemplate>
+                                </DataGridTemplateColumn.CellTemplate>
+                            </DataGridTemplateColumn>
+                            <DataGridTextColumn Header="编码状态"
+                                                Width="120"
+                                                IsReadOnly="True"
+                                                SortMemberPath="EncodingDisplay"
+                                                Binding="{Binding EncodingDisplay}" />
+                            <DataGridTextColumn Header="输出大小"
+                                                Width="90"
+                                                IsReadOnly="True"
+                                                SortMemberPath="OutputSizeDisplay"
+                                                Binding="{Binding OutputSizeDisplay}" />
+                            <DataGridTextColumn Header="剩余"
+                                                Width="74"
+                                                IsReadOnly="True"
+                                                SortMemberPath="RemainingDisplay"
+                                                Binding="{Binding RemainingDisplay}" />
+                            <DataGridTextColumn Header="完整路径"
+                                                Width="280"
+                                                IsReadOnly="True"
+                                                SortMemberPath="FullPath"
+                                                Binding="{Binding FullPath}" />
+                        </DataGrid.Columns>
+                    </DataGrid>
+
+                    <Border Grid.Row="2"
+                            Margin="0,8,0,0"
+                            Padding="12,8"
+                            Background="#FAFBFC"
+                            BorderBrush="#EDF0F4"
+                            BorderThickness="0,1,0,0">
+                        <TextBlock Foreground="{StaticResource MutedTextBrush}"
+                                   Text="文件处理将在临时文件中完成，并在 ffprobe 验证成功后才会提交最终输出。" />
+                    </Border>
+                </Grid>
+            </Border>
+
+            <GridSplitter Grid.Column="1"
+                          Width="6"
+                          HorizontalAlignment="Stretch"
+                          VerticalAlignment="Stretch"
+                          Background="Transparent"
+                          ShowsPreview="True" />
+
+            <Border Grid.Column="2"
+                    Background="{StaticResource SurfaceBrush}"
+                    BorderBrush="{StaticResource BorderBrush}"
+                    BorderThickness="1"
+                    CornerRadius="7">
+                <TabControl TabStripPlacement="Top"
+                            BorderThickness="0"
+                            Background="{StaticResource SurfaceBrush}"
+                            ItemsPanel="{StaticResource SettingsTabItemsPanel}"
+                            ItemContainerStyle="{StaticResource TabItemStyle}">
+                    <TabItem Header="压缩条件">
+                        <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                            <StackPanel Margin="12">
+                                <TextBlock Text="满足条件的视频才会进入压缩队列。后续条件可使用 AND / OR 连接。"
+                                           Foreground="{StaticResource MutedTextBrush}"
+                                           TextWrapping="Wrap"
+                                           Margin="0,0,0,10" />
+                                <Border Style="{StaticResource VisibleWhenNoRules}"
+                                        Padding="14"
+                                        Background="#FAFBFC"
+                                        BorderBrush="{StaticResource BorderBrush}"
+                                        BorderThickness="1"
+                                        CornerRadius="5">
+                                    <StackPanel>
+                                        <TextBlock Text="当前没有压缩条件。"
+                                                   FontWeight="SemiBold"
+                                                   Margin="0,0,0,5" />
+                                        <TextBlock Text="未设置条件时，所有选中的视频都会进行压缩。"
+                                                   Foreground="{StaticResource MutedTextBrush}"
+                                                   TextWrapping="Wrap"
+                                                   Margin="0,0,0,12" />
+                                        <Button Content="添加条件"
+                                                HorizontalAlignment="Left"
+                                                Command="{Binding AddRuleCommand}"
+                                                Style="{StaticResource ActionButtonStyle}" />
+                                    </StackPanel>
+                                </Border>
+                                <Border Style="{StaticResource VisibleWhenRulesAreDisabled}"
+                                        Margin="0,0,0,10"
+                                        Padding="10"
+                                        Background="#FAFBFC"
+                                        BorderBrush="{StaticResource BorderBrush}"
+                                        BorderThickness="1"
+                                        CornerRadius="5">
+                                    <TextBlock Foreground="{StaticResource MutedTextBrush}"
+                                               TextWrapping="Wrap"
+                                               Text="当前没有启用的压缩条件。所有选中的视频都会进行压缩。" />
+                                </Border>
+                                <DataGrid ItemsSource="{Binding Rules}"
+                                          SelectedItem="{Binding SelectedRule, Mode=TwoWay}"
+                                          Style="{StaticResource VisibleWhenRulesExist}"
+                                          AutoGenerateColumns="False"
+                                          CanUserAddRows="False"
+                                          CanUserDeleteRows="False"
+                                          HeadersVisibility="Column"
+                                          CanUserSortColumns="False"
+                                          IsReadOnly="False"
+                                          MinHeight="170"
+                                          MaxHeight="330"
+                                          BorderBrush="{StaticResource BorderBrush}"
+                                          GridLinesVisibility="Horizontal"
+                                          AlternationCount="2147483647"
+                                          RowHeaderWidth="0">
+                                    <DataGrid.Columns>
+                                        <DataGridCheckBoxColumn Header="启用"
+                                                                Width="48"
+                                                                Binding="{Binding IsEnabled, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                                        <DataGridTemplateColumn Header="连接" Width="62">
+                                            <DataGridTemplateColumn.CellTemplate>
+                                                <DataTemplate>
+                                                    <Grid>
+                                                        <TextBlock x:Name="FirstRuleJoin"
+                                                                   Text="—"
+                                                                   Visibility="Collapsed"
+                                                                   HorizontalAlignment="Center"
+                                                                   VerticalAlignment="Center"
+                                                                   Foreground="{StaticResource MutedTextBrush}" />
+                                                        <ComboBox x:Name="JoinSelector"
+                                                                  Style="{StaticResource SelectStyle}"
+                                                                  ItemsSource="{Binding DataContext.RuleJoins, RelativeSource={RelativeSource AncestorType={x:Type Window}}}"
+                                                                  SelectedItem="{Binding JoinWithPrevious, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                                                    </Grid>
+                                                    <DataTemplate.Triggers>
+                                                        <DataTrigger Binding="{Binding RelativeSource={RelativeSource AncestorType={x:Type DataGridRow}}, Path=(ItemsControl.AlternationIndex)}" Value="0">
+                                                            <Setter TargetName="FirstRuleJoin" Property="Visibility" Value="Visible" />
+                                                            <Setter TargetName="JoinSelector" Property="Visibility" Value="Collapsed" />
+                                                        </DataTrigger>
+                                                    </DataTemplate.Triggers>
+                                                </DataTemplate>
+                                            </DataGridTemplateColumn.CellTemplate>
+                                        </DataGridTemplateColumn>
+                                        <DataGridTemplateColumn Header="字段" Width="*">
+                                            <DataGridTemplateColumn.CellTemplate>
+                                                <DataTemplate>
+                                                    <ComboBox Style="{StaticResource SelectStyle}"
+                                                              ItemsSource="{Binding DataContext.RuleFields, RelativeSource={RelativeSource AncestorType={x:Type Window}}}"
+                                                              SelectedItem="{Binding Field, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                                                </DataTemplate>
+                                            </DataGridTemplateColumn.CellTemplate>
+                                        </DataGridTemplateColumn>
+                                        <DataGridTemplateColumn Header="比较" Width="*">
+                                            <DataGridTemplateColumn.CellTemplate>
+                                                <DataTemplate>
+                                                    <ComboBox Style="{StaticResource SelectStyle}"
+                                                              ItemsSource="{Binding DataContext.RuleComparisons, RelativeSource={RelativeSource AncestorType={x:Type Window}}}"
+                                                              SelectedItem="{Binding Comparison, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                                                </DataTemplate>
+                                            </DataGridTemplateColumn.CellTemplate>
+                                        </DataGridTemplateColumn>
+                                        <DataGridTemplateColumn Header="值" Width="*">
+                                            <DataGridTemplateColumn.CellTemplate>
+                                                <DataTemplate>
+                                                    <TextBox Style="{StaticResource InputStyle}"
+                                                             Text="{Binding Value, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                                                </DataTemplate>
+                                            </DataGridTemplateColumn.CellTemplate>
+                                        </DataGridTemplateColumn>
+                                        <DataGridTemplateColumn Header="单位" Width="58">
+                                            <DataGridTemplateColumn.CellTemplate>
+                                                <DataTemplate>
+                                                    <TextBlock Text="{Binding Unit}"
+                                                               HorizontalAlignment="Center"
+                                                               VerticalAlignment="Center"
+                                                               Foreground="{StaticResource MutedTextBrush}" />
+                                                </DataTemplate>
+                                            </DataGridTemplateColumn.CellTemplate>
+                                        </DataGridTemplateColumn>
+                                    </DataGrid.Columns>
+                                </DataGrid>
+                                <StackPanel Style="{StaticResource VisibleWhenRulesExist}"
+                                            Orientation="Horizontal"
+                                            HorizontalAlignment="Right"
+                                            Margin="0,10,0,0">
+                                    <Button Content="添加条件"
+                                            Command="{Binding AddRuleCommand}"
+                                            Style="{StaticResource ActionButtonStyle}" />
+                                    <Button Content="删除条件"
+                                            Command="{Binding RemoveRuleCommand}"
+                                            Style="{StaticResource DangerButtonStyle}" />
+                                </StackPanel>
+                            </StackPanel>
+                        </ScrollViewer>
+                    </TabItem>
+
+                    <TabItem Header="视频参数">
+                        <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                            <StackPanel Margin="12">
+                                <GroupBox Header="编码器与压缩方式" Style="{StaticResource SectionGroupStyle}">
+                                    <StackPanel>
+                                        <Grid Margin="0,0,0,8">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="112" />
+                                                <ColumnDefinition Width="*" />
+                                            </Grid.ColumnDefinitions>
+                                            <TextBlock Grid.Column="0" Text="压缩方式" Style="{StaticResource FieldLabelStyle}" />
+                                            <ComboBox Grid.Column="1"
+                                                      Style="{StaticResource SelectStyle}"
+                                                      ItemsSource="{Binding CompressionModes}"
+                                                      SelectedItem="{Binding Settings.CompressionMode, Mode=TwoWay}" />
+                                        </Grid>
+                                        <Grid Style="{StaticResource VisibleForCrfMode}" Margin="0,0,0,8">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="112" />
+                                                <ColumnDefinition Width="*" />
+                                            </Grid.ColumnDefinitions>
+                                            <TextBlock Grid.Column="0" Text="CRF" Style="{StaticResource FieldLabelStyle}" />
+                                            <TextBox Grid.Column="1"
+                                                     Style="{StaticResource InputStyle}"
+                                                     Text="{Binding Settings.Crf, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                                        </Grid>
+                                        <Grid Style="{StaticResource VisibleForBitrateMode}" Margin="0,0,0,8">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="112" />
+                                                <ColumnDefinition Width="*" />
+                                            </Grid.ColumnDefinitions>
+                                            <TextBlock Grid.Column="0" Text="目标视频码率" Style="{StaticResource FieldLabelStyle}" />
+                                            <DockPanel Grid.Column="1">
+                                                <TextBlock DockPanel.Dock="Right" Text="Mbps" Margin="8,0,0,0" VerticalAlignment="Center" Foreground="{StaticResource MutedTextBrush}" />
+                                                <TextBox Style="{StaticResource InputStyle}"
+                                                         Text="{Binding Settings.TargetVideoBitrateMbps, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                                            </DockPanel>
+                                        </Grid>
+                                        <Grid Style="{StaticResource VisibleForTargetSizeMode}" Margin="0,0,0,8">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="112" />
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="78" />
+                                            </Grid.ColumnDefinitions>
+                                            <TextBlock Grid.Column="0" Text="目标文件大小" Style="{StaticResource FieldLabelStyle}" />
+                                            <TextBox Grid.Column="1"
+                                                     Style="{StaticResource InputStyle}"
+                                                     Text="{Binding Settings.TargetSizeValue, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                                            <ComboBox Grid.Column="2"
+                                                      Margin="8,0,0,0"
+                                                      Style="{StaticResource SelectStyle}"
+                                                      ItemsSource="{Binding TargetSizeUnits}"
+                                                      SelectedItem="{Binding Settings.TargetSizeUnit, Mode=TwoWay}" />
+                                        </Grid>
+                                        <TextBlock Style="{StaticResource VisibleForTargetSizeMode}"
+                                                   Margin="112,0,0,8"
+                                                   Foreground="{StaticResource MutedTextBrush}"
+                                                   TextWrapping="Wrap"
+                                                    Text="会根据时长、音频码率和容器开销估算视频码率，并使用 Two-pass。" />
+                                        <Grid Style="{StaticResource VisibleForSmartMode}" Margin="0,0,0,8">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="112" />
+                                                <ColumnDefinition Width="*" />
+                                            </Grid.ColumnDefinitions>
+                                            <TextBlock Grid.Column="0" Text="智能预设" Style="{StaticResource FieldLabelStyle}" />
+                                            <ComboBox Grid.Column="1"
+                                                      Style="{StaticResource SelectStyle}"
+                                                      ItemsSource="{Binding SmartPresets}"
+                                                      SelectedItem="{Binding Settings.SmartPreset, Mode=TwoWay}" />
+                                        </Grid>
+                                        <Grid Style="{StaticResource VisibleForSmartMode}" Margin="0,0,0,8">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="112" />
+                                                <ColumnDefinition Width="*" />
+                                            </Grid.ColumnDefinitions>
+                                            <TextBlock Grid.Column="0" Text="最高视频码率" Style="{StaticResource FieldLabelStyle}" />
+                                            <DockPanel Grid.Column="1">
+                                                <TextBlock DockPanel.Dock="Right" Text="Mbps（0 = 不限制）" Margin="8,0,0,0" VerticalAlignment="Center" Foreground="{StaticResource MutedTextBrush}" />
+                                                <TextBox Style="{StaticResource InputStyle}"
+                                                         Text="{Binding Settings.SmartMaximumVideoBitrateMbps, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                                            </DockPanel>
+                                        </Grid>
+                                        <Grid Style="{StaticResource VisibleForSmartMode}" Margin="0,0,0,8">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="112" />
+                                                <ColumnDefinition Width="*" />
+                                            </Grid.ColumnDefinitions>
+                                            <TextBlock Grid.Column="0" Text="远程播放带宽" Style="{StaticResource FieldLabelStyle}" />
+                                            <DockPanel Grid.Column="1">
+                                                <TextBlock DockPanel.Dock="Right" Text="Mbps（远程预设）" Margin="8,0,0,0" VerticalAlignment="Center" Foreground="{StaticResource MutedTextBrush}" />
+                                                <TextBox Style="{StaticResource InputStyle}"
+                                                         Text="{Binding Settings.RemotePlaybackBandwidthMbps, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                                            </DockPanel>
+                                        </Grid>
+                                        <Grid Style="{StaticResource VisibleForSmartMode}" Margin="0,0,0,8">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="112" />
+                                                <ColumnDefinition Width="*" />
+                                            </Grid.ColumnDefinitions>
+                                            <TextBlock Grid.Column="0" Text="安全余量" Style="{StaticResource FieldLabelStyle}" />
+                                            <StackPanel Grid.Column="1" Orientation="Horizontal">
+                                                <TextBlock Text="自动（推荐） · "
+                                                           Foreground="{StaticResource MutedTextBrush}"
+                                                           VerticalAlignment="Center" />
+                                                <TextBlock Foreground="{StaticResource MutedTextBrush}"
+                                                           VerticalAlignment="Center"
+                                                           Text="{Binding Settings.RemotePlaybackSafetyRatio, StringFormat={}{0:P0}}" />
+                                            </StackPanel>
+                                        </Grid>
+                                        <Grid Style="{StaticResource VisibleForSmartMode}" Margin="0,0,0,8">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="112" />
+                                                <ColumnDefinition Width="*" />
+                                            </Grid.ColumnDefinitions>
+                                            <TextBlock Grid.Column="0" Text="质量 / 收益" Style="{StaticResource FieldLabelStyle}" />
+                                            <StackPanel Grid.Column="1" Orientation="Horizontal">
+                                                <TextBlock Text="质量系数" VerticalAlignment="Center" Foreground="{StaticResource MutedTextBrush}" />
+                                                <TextBox Width="72" Margin="5,0,12,0" Style="{StaticResource InputStyle}"
+                                                         Text="{Binding Settings.SmartQualityFactor, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                                                <TextBlock Text="最低收益" VerticalAlignment="Center" Foreground="{StaticResource MutedTextBrush}" />
+                                                <TextBox Width="72" Margin="5,0,0,0" Style="{StaticResource InputStyle}"
+                                                         Text="{Binding Settings.SmartMinimumExpectedSavingRatio, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                                            </StackPanel>
+                                        </Grid>
+                                        <TextBlock Style="{StaticResource VisibleForSmartMode}"
+                                                   Margin="112,0,0,8"
+                                                   Foreground="{StaticResource MutedTextBrush}"
+                                                   TextWrapping="Wrap"
+                                                   Text="远程播放会将带宽乘以安全系数，再扣除音频与容器/峰值余量；它不是把所有视频固定压到同一个 Mbps。" />
+                                        <Grid Margin="0,0,0,8">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="112" />
+                                                <ColumnDefinition Width="*" />
+                                            </Grid.ColumnDefinitions>
+                                            <TextBlock Grid.Column="0" Text="Preset" Style="{StaticResource FieldLabelStyle}" />
+                                            <ComboBox Grid.Column="1"
+                                                      Style="{StaticResource SelectStyle}"
+                                                      ItemsSource="{Binding EncodingPresets}"
+                                                      SelectedItem="{Binding Settings.EncodingPreset, Mode=TwoWay}" />
+                                        </Grid>
+                                        <Grid Margin="0,0,0,8">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="112" />
+                                                <ColumnDefinition Width="*" />
+                                            </Grid.ColumnDefinitions>
+                                            <TextBlock Grid.Column="0" Text="目标编码格式" Style="{StaticResource FieldLabelStyle}" />
+                                            <ComboBox Grid.Column="1"
+                                                      Style="{StaticResource SelectStyle}"
+                                                      ItemsSource="{Binding OutputVideoCodecs}"
+                                                      SelectedItem="{Binding Settings.SelectedVideoCodec, Mode=TwoWay}" />
+                                        </Grid>
+                                        <Grid>
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="112" />
+                                                <ColumnDefinition Width="*" />
+                                            </Grid.ColumnDefinitions>
+                                            <TextBlock Grid.Column="0" Text="编码方式" Style="{StaticResource FieldLabelStyle}" />
+                                            <ComboBox Grid.Column="1"
+                                                      Style="{StaticResource SelectStyle}"
+                                                      ItemsSource="{Binding EncoderModes}"
+                                                      SelectedItem="{Binding Settings.SelectedEncoderSelection, Mode=TwoWay}"
+                                                      ToolTip="{Binding EncoderCapabilitySummary}" />
+                                        </Grid>
+                                    </StackPanel>
+                                </GroupBox>
+
+                                <GroupBox Header="分辨率限制（只缩小，不放大）" Style="{StaticResource SectionGroupStyle}">
+                                    <Grid>
+                                        <Grid.RowDefinitions>
+                                            <RowDefinition Height="Auto" />
+                                            <RowDefinition Height="Auto" />
+                                        </Grid.RowDefinitions>
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="112" />
+                                            <ColumnDefinition Width="*" />
+                                        </Grid.ColumnDefinitions>
+                                        <TextBlock Grid.Row="0" Grid.Column="0" Text="分辨率" Style="{StaticResource FieldLabelStyle}" />
+                                        <ComboBox Grid.Row="0" Grid.Column="1"
+                                                  Style="{StaticResource SelectStyle}"
+                                                  ItemsSource="{Binding ResolutionPresets}"
+                                                  SelectedItem="{Binding Settings.ResolutionLimit, Mode=TwoWay}" />
+                                        <TextBlock Grid.Row="1" Grid.Column="0"
+                                                   Style="{StaticResource CustomResolutionLabelStyle}"
+                                                   Text="自定义最大值" />
+                                        <StackPanel Grid.Row="1" Grid.Column="1"
+                                                    Style="{StaticResource VisibleForCustomResolution}"
+                                                    Orientation="Horizontal">
+                                            <TextBox Width="82" Style="{StaticResource InputStyle}" Text="{Binding Settings.CustomMaxWidth, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                                            <TextBlock Text="×" Margin="8,0" VerticalAlignment="Center" Foreground="{StaticResource MutedTextBrush}" />
+                                            <TextBox Width="82" Style="{StaticResource InputStyle}" Text="{Binding Settings.CustomMaxHeight, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                                            <TextBlock Text="像素" Margin="8,0,0,0" VerticalAlignment="Center" Foreground="{StaticResource MutedTextBrush}" />
+                                        </StackPanel>
+                                    </Grid>
+                                </GroupBox>
+
+                                <GroupBox Header="帧率限制（只降低，不提高）" Style="{StaticResource SectionGroupStyle}">
+                                    <Grid>
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="112" />
+                                            <ColumnDefinition Width="*" />
+                                        </Grid.ColumnDefinitions>
+                                        <TextBlock Grid.Column="0" Text="最大 FPS" Style="{StaticResource FieldLabelStyle}" />
+                                        <StackPanel Grid.Column="1" Orientation="Horizontal">
+                                            <ComboBox Width="150"
+                                                      Style="{StaticResource SelectStyle}"
+                                                      ItemsSource="{Binding FpsPresets}"
+                                                      SelectedItem="{Binding Settings.FpsLimit, Mode=TwoWay}" />
+                                            <TextBox Width="75"
+                                                     Margin="8,0,0,0"
+                                                     Style="{StaticResource CustomFpsInputStyle}"
+                                                     Text="{Binding Settings.CustomMaxFps, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                                        </StackPanel>
+                                    </Grid>
+                                </GroupBox>
+                            </StackPanel>
+                        </ScrollViewer>
+                    </TabItem>
+
+                    <TabItem Header="音频">
+                        <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                            <StackPanel Margin="12">
+                                <GroupBox Header="音频设置" Style="{StaticResource SectionGroupStyle}">
+                                    <Grid>
+                                        <Grid.RowDefinitions>
+                                            <RowDefinition Height="Auto" />
+                                            <RowDefinition Height="Auto" />
+                                        </Grid.RowDefinitions>
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="112" />
+                                            <ColumnDefinition Width="*" />
+                                        </Grid.ColumnDefinitions>
+                                        <TextBlock Grid.Row="0" Grid.Column="0" Text="处理方式" Style="{StaticResource FieldLabelStyle}" />
+                                        <ComboBox Grid.Row="0" Grid.Column="1"
+                                                  Style="{StaticResource SelectStyle}"
+                                                  ItemsSource="{Binding AudioModes}"
+                                                  SelectedItem="{Binding Settings.AudioMode, Mode=TwoWay}" />
+                                        <Grid Grid.Row="1" Grid.Column="0" Grid.ColumnSpan="2" Style="{StaticResource VisibleForAac}">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="112" />
+                                                <ColumnDefinition Width="*" />
+                                            </Grid.ColumnDefinitions>
+                                            <TextBlock Grid.Column="0" Text="AAC 码率" Style="{StaticResource FieldLabelStyle}" />
+                                            <DockPanel Grid.Column="1">
+                                                <TextBlock DockPanel.Dock="Right" Text="Kbps" Margin="8,0,0,0" VerticalAlignment="Center" Foreground="{StaticResource MutedTextBrush}" />
+                                                <TextBox Style="{StaticResource InputStyle}"
+                                                         Text="{Binding Settings.AudioBitrateKbps, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                                            </DockPanel>
+                                        </Grid>
+                                    </Grid>
+                                </GroupBox>
+                                <GroupBox Header="流与元数据" Style="{StaticResource SectionGroupStyle}">
+                                    <StackPanel>
+                                        <CheckBox Content="尽量保留多音轨" IsChecked="True" IsEnabled="False" Margin="0,2,0,8" />
+                                        <CheckBox Content="尽量保留字幕" IsChecked="True" IsEnabled="False" Margin="0,2,0,8" />
+                                        <CheckBox Content="保留 Metadata 与 Chapters" IsChecked="True" IsEnabled="False" />
+                                        <TextBlock Margin="0,12,0,0"
+                                                   Foreground="{StaticResource MutedTextBrush}"
+                                                   TextWrapping="Wrap"
+                                                   Text="如果目标容器不支持某种字幕或其他流，处理时会保留可兼容的流并在状态中给出提示。" />
+                                    </StackPanel>
+                                </GroupBox>
+                            </StackPanel>
+                        </ScrollViewer>
+                    </TabItem>
+
+                    <TabItem Header="输出">
+                        <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                            <StackPanel Margin="12">
+                                <GroupBox Header="输出位置" Style="{StaticResource SectionGroupStyle}">
+                                    <StackPanel>
+                                        <Grid Margin="0,0,0,8">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="112" />
+                                                <ColumnDefinition Width="*" />
+                                            </Grid.ColumnDefinitions>
+                                            <TextBlock Grid.Column="0" Text="位置模式" Style="{StaticResource FieldLabelStyle}" />
+                                            <ComboBox Grid.Column="1"
+                                                      Style="{StaticResource SelectStyle}"
+                                                      ItemsSource="{Binding OutputLocations}"
+                                                      SelectedItem="{Binding Settings.OutputLocation, Mode=TwoWay}" />
+                                        </Grid>
+                                        <TextBlock Style="{StaticResource VisibleForSameDirectory}"
+                                                   Margin="112,0,0,0"
+                                                   Foreground="{StaticResource MutedTextBrush}"
+                                                   TextWrapping="Wrap"
+                                                   Text="输出到源视频所在目录。" />
+                                        <Grid Style="{StaticResource VisibleForSelectedDirectory}">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="112" />
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="Auto" />
+                                            </Grid.ColumnDefinitions>
+                                            <TextBlock Grid.Column="0" Text="统一输出目录" Style="{StaticResource FieldLabelStyle}" />
+                                            <TextBox Grid.Column="1"
+                                                     Style="{StaticResource InputStyle}"
+                                                     Text="{Binding Settings.OutputDirectory, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                                            <Button Grid.Column="2"
+                                                    Content="浏览…"
+                                                    Command="{Binding BrowseOutputDirectoryCommand}"
+                                                    Style="{StaticResource ActionButtonStyle}" />
+                                        </Grid>
+                                        <CheckBox Style="{StaticResource VisibleForSelectedDirectory}"
+                                                  Content="保留原目录结构"
+                                                  IsChecked="{Binding Settings.PreserveDirectoryStructure, Mode=TwoWay}"
+                                                  Margin="112,8,0,0" />
+                                        <Grid Style="{StaticResource VisibleForChildDirectory}">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="112" />
+                                                <ColumnDefinition Width="*" />
+                                            </Grid.ColumnDefinitions>
+                                            <TextBlock Grid.Column="0" Text="子目录名称" Style="{StaticResource FieldLabelStyle}" />
+                                            <TextBox Grid.Column="1"
+                                                     Style="{StaticResource InputStyle}"
+                                                     Text="{Binding Settings.OutputSubdirectory, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                                        </Grid>
+                                    </StackPanel>
+                                </GroupBox>
+                            </StackPanel>
+                        </ScrollViewer>
+                    </TabItem>
+
+                    <TabItem Header="原文件">
+                        <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                            <StackPanel Margin="12">
+                                <GroupBox Header="压缩成功后的源文件处理" Style="{StaticResource SectionGroupStyle}">
+                                    <Grid>
+                                        <Grid.RowDefinitions>
+                                            <RowDefinition Height="Auto" />
+                                            <RowDefinition Height="Auto" />
+                                            <RowDefinition Height="Auto" />
+                                        </Grid.RowDefinitions>
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="112" />
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+                                        <TextBlock Grid.Row="0" Grid.Column="0" Text="处理方式" Style="{StaticResource FieldLabelStyle}" />
+                                        <ComboBox Grid.Row="0" Grid.Column="1"
+                                                  Style="{StaticResource SelectStyle}"
+                                                  ItemsSource="{Binding OriginalFileActions}"
+                                                  SelectedItem="{Binding Settings.OriginalFileAction, Mode=TwoWay}" />
+                                        <TextBlock Grid.Row="1" Grid.Column="0" Text="移动到目录" Style="{StaticResource FieldLabelStyle}" />
+                                         <TextBox Grid.Row="1" Grid.Column="1"
+                                                  Style="{StaticResource InputStyle}"
+                                                  Text="{Binding Settings.OriginalFilesDirectory, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                                         <Button Grid.Row="1" Grid.Column="2"
+                                                 Content="浏览…"
+                                                 Command="{Binding BrowseOriginalFilesDirectoryCommand}"
+                                                 Style="{StaticResource ActionButtonStyle}" />
+                                        <TextBlock Grid.Row="2" Grid.Column="0" Text="原目录子目录" Style="{StaticResource FieldLabelStyle}" />
+                                        <TextBox Grid.Row="2" Grid.Column="1"
+                                                 Style="{StaticResource InputStyle}"
+                                                 Text="{Binding Settings.OriginalFilesSubdirectory, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                                    </Grid>
+                                </GroupBox>
+                                <Border Padding="10"
+                                        Background="#FFF8E8"
+                                        BorderBrush="#F0D38B"
+                                        BorderThickness="1"
+                                        CornerRadius="5">
+                                    <TextBlock TextWrapping="Wrap"
+                                               Foreground="#795B16"
+                                               Text="安全保护：只有 FFmpeg 成功、输出文件通过 ffprobe 验证且确认至少存在视频流、时长基本一致后，才会移动源文件。任务失败或取消时源文件保持不动。" />
+                                </Border>
+                                <CheckBox Margin="2,12,0,0"
+                                          Content="如果压缩后文件比原文件更大，则放弃压缩结果"
+                                          IsChecked="{Binding Settings.DiscardIfLarger, Mode=TwoWay}" />
+                            </StackPanel>
+                        </ScrollViewer>
+                    </TabItem>
+
+                    <TabItem Header="命名与性能">
+                        <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                            <StackPanel Margin="12">
+                                <GroupBox Header="压缩文件命名" Style="{StaticResource SectionGroupStyle}">
+                                    <Grid>
+                                        <Grid.RowDefinitions>
+                                            <RowDefinition Height="Auto" />
+                                            <RowDefinition Height="Auto" />
+                                            <RowDefinition Height="Auto" />
+                                            <RowDefinition Height="Auto" />
+                                        </Grid.RowDefinitions>
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="112" />
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+                                        <TextBlock Grid.Row="0" Grid.Column="0" Text="输出前缀" Style="{StaticResource FieldLabelStyle}" />
+                                        <TextBox Grid.Row="0" Grid.Column="1" Style="{StaticResource InputStyle}" Text="{Binding Settings.OutputPrefix, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                                        <TextBlock Grid.Row="1" Grid.Column="0" Text="输出后缀" Style="{StaticResource FieldLabelStyle}" />
+                                        <TextBox Grid.Row="1" Grid.Column="1" Style="{StaticResource InputStyle}" Text="{Binding Settings.OutputSuffix, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                                        <TextBlock Grid.Row="2" Grid.Column="0" Text="原文件前缀" Style="{StaticResource FieldLabelStyle}" />
+                                        <TextBox Grid.Row="2" Grid.Column="1" Style="{StaticResource InputStyle}" Text="{Binding Settings.OriginalPrefix, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                                        <TextBlock Grid.Row="3" Grid.Column="0" Text="原文件后缀" Style="{StaticResource FieldLabelStyle}" />
+                                        <TextBox Grid.Row="3" Grid.Column="1" Style="{StaticResource InputStyle}" Text="{Binding Settings.OriginalSuffix, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                                    </Grid>
+                                </GroupBox>
+                                <TextBlock Margin="2,0,0,12"
+                                           Foreground="{StaticResource MutedTextBrush}"
+                                           TextWrapping="Wrap"
+                                           Text="扩展名始终保留在最后；同名文件会自动使用 (1)、(2)…，不会无提示覆盖。" />
+                                <GroupBox Header="工具与并发" Style="{StaticResource SectionGroupStyle}">
+                                    <Grid>
+                                        <Grid.RowDefinitions>
+                                            <RowDefinition Height="Auto" />
+                                            <RowDefinition Height="Auto" />
+                                            <RowDefinition Height="Auto" />
+                                        </Grid.RowDefinitions>
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="112" />
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+                                        <TextBlock Grid.Row="0" Grid.Column="0" Text="FFmpeg 路径" Style="{StaticResource FieldLabelStyle}" />
+                                         <TextBox Grid.Row="0" Grid.Column="1"
+                                                  Style="{StaticResource InputStyle}"
+                                                  Text="{Binding Settings.FFmpegDirectory, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                                  ToolTip="留空时按软件目录、用户设置和 PATH 顺序查找 ffmpeg.exe / ffprobe.exe" />
+                                         <Button Grid.Row="0" Grid.Column="2"
+                                                 Content="浏览…"
+                                                 Command="{Binding BrowseFfmpegCommand}"
+                                                 Style="{StaticResource ActionButtonStyle}" />
+                                        <TextBlock Grid.Row="1" Grid.Column="0" Text="ffprobe 并发" Style="{StaticResource FieldLabelStyle}" />
+                                        <DockPanel Grid.Row="1" Grid.Column="1">
+                                            <TextBlock DockPanel.Dock="Right" Text="1 - 8" Margin="8,0,0,0" VerticalAlignment="Center" Foreground="{StaticResource MutedTextBrush}" />
+                                            <TextBox Style="{StaticResource InputStyle}" Text="{Binding Settings.ProbeConcurrency, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                                        </DockPanel>
+                                        <TextBlock Grid.Row="2" Grid.Column="0" Text="压缩并发" Style="{StaticResource FieldLabelStyle}" />
+                                        <DockPanel Grid.Row="2" Grid.Column="1">
+                                            <TextBlock DockPanel.Dock="Right" Text="1 - 4（默认 1）" Margin="8,0,0,0" VerticalAlignment="Center" Foreground="{StaticResource MutedTextBrush}" />
+                                            <TextBox Style="{StaticResource InputStyle}" Text="{Binding Settings.CompressionConcurrency, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                                        </DockPanel>
+                                    </Grid>
+                                </GroupBox>
+                            </StackPanel>
+                        </ScrollViewer>
+                    </TabItem>
+                </TabControl>
+            </Border>
+        </Grid>
+    </Grid>
+</Window>

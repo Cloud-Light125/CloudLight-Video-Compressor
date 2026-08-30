@@ -1,0 +1,36 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31903.59
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "src", "src", "{A17818A8-7958-446C-9C2E-5667737382C1}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CloudLight.VideoCompressor", "src\CloudLight.VideoCompressor\CloudLight.VideoCompressor.csproj", "{FFF31290-BA39-4B19-8D04-5ABE0F7A654A}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "tests", "tests", "{5891C0B3-5271-4538-9404-626EF6CA80ED}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CloudLight.VideoCompressor.Tests", "tests\CloudLight.VideoCompressor.Tests\CloudLight.VideoCompressor.Tests.csproj", "{A8EAD622-F133-406B-87B5-D7256774D3A7}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{FFF31290-BA39-4B19-8D04-5ABE0F7A654A}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{FFF31290-BA39-4B19-8D04-5ABE0F7A654A}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{FFF31290-BA39-4B19-8D04-5ABE0F7A654A}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{FFF31290-BA39-4B19-8D04-5ABE0F7A654A}.Release|Any CPU.Build.0 = Release|Any CPU
+		{A8EAD622-F133-406B-87B5-D7256774D3A7}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{A8EAD622-F133-406B-87B5-D7256774D3A7}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{A8EAD622-F133-406B-87B5-D7256774D3A7}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{A8EAD622-F133-406B-87B5-D7256774D3A7}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(NestedProjects) = preSolution
+		{FFF31290-BA39-4B19-8D04-5ABE0F7A654A} = {A17818A8-7958-446C-9C2E-5667737382C1}
+		{A8EAD622-F133-406B-87B5-D7256774D3A7} = {5891C0B3-5271-4538-9404-626EF6CA80ED}
+	EndGlobalSection
+EndGlobal
