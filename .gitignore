@@ -10,3 +10,7 @@ artifacts/
 **/settings.json
 **/logs/
 **/.clvc-*
+**/cache/
+**/benchmark.json
+**/session.json
+**/Temp/

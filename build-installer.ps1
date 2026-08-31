@@ -1,5 +1,7 @@
 [CmdletBinding()]
-param()
+param(
+    [switch]$SkipInternalTests
+)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -148,13 +150,18 @@ if (Test-Path -LiteralPath $expectedInstallerPath -PathType Leaf) {
 Invoke-NativeTool -FilePath 'dotnet' -Arguments @('restore', $solutionPath)
 Invoke-NativeTool -FilePath 'dotnet' -Arguments @('build', $solutionPath, '-c', 'Release', '--no-restore')
 
-$previousFfmpegTestDirectory = [Environment]::GetEnvironmentVariable('CLOUDLIGHT_FFMPEG_TEST_DIR', 'Process')
-try {
-    [Environment]::SetEnvironmentVariable('CLOUDLIGHT_FFMPEG_TEST_DIR', $ffmpegSourceDirectory, 'Process')
-    Invoke-NativeTool -FilePath 'dotnet' -Arguments @('test', $solutionPath, '-c', 'Release', '--no-build', '--no-restore')
+if (-not $SkipInternalTests) {
+    $previousFfmpegTestDirectory = [Environment]::GetEnvironmentVariable('CLOUDLIGHT_FFMPEG_TEST_DIR', 'Process')
+    try {
+        [Environment]::SetEnvironmentVariable('CLOUDLIGHT_FFMPEG_TEST_DIR', $ffmpegSourceDirectory, 'Process')
+        Invoke-NativeTool -FilePath 'dotnet' -Arguments @('test', $solutionPath, '-c', 'Release', '--no-build', '--no-restore')
+    }
+    finally {
+        [Environment]::SetEnvironmentVariable('CLOUDLIGHT_FFMPEG_TEST_DIR', $previousFfmpegTestDirectory, 'Process')
+    }
 }
-finally {
-    [Environment]::SetEnvironmentVariable('CLOUDLIGHT_FFMPEG_TEST_DIR', $previousFfmpegTestDirectory, 'Process')
+else {
+    Write-Host 'Skipping build-installer.ps1 internal test rerun; the standalone Release test gate already passed.'
 }
 
 Invoke-NativeTool -FilePath 'dotnet' -Arguments @(

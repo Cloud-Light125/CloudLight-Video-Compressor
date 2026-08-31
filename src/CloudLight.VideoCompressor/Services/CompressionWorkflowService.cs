@@ -13,6 +13,8 @@ public sealed class CompressionWorkflowService
     private readonly OutputPathService _outputPathService;
     private readonly SafeFileService _safeFileService;
     private readonly EncoderCapabilitySet? _defaultCapabilities;
+    private readonly MediaProbeCache _probeCache;
+    private readonly MediaHealthCheckService _healthCheckService;
     private readonly object _pathReservationLock = new();
     private readonly HashSet<string> _reservedPaths = new(StringComparer.OrdinalIgnoreCase);
 
@@ -24,7 +26,9 @@ public sealed class CompressionWorkflowService
         TargetSizeCalculator targetSizeCalculator,
         OutputPathService outputPathService,
         SafeFileService safeFileService,
-        EncoderCapabilitySet? defaultCapabilities = null)
+        EncoderCapabilitySet? defaultCapabilities = null,
+        MediaProbeCache? probeCache = null,
+        MediaHealthCheckService? healthCheckService = null)
     {
         _ruleEngine = ruleEngine;
         _ffprobeService = ffprobeService;
@@ -34,6 +38,8 @@ public sealed class CompressionWorkflowService
         _outputPathService = outputPathService;
         _safeFileService = safeFileService;
         _defaultCapabilities = defaultCapabilities;
+        _probeCache = probeCache ?? new MediaProbeCache();
+        _healthCheckService = healthCheckService ?? new MediaHealthCheckService(_probeCache, _ffprobeService, _ffmpegService);
     }
 
     public Task<CompressionJobResult> ProcessFileAsync(
@@ -43,7 +49,8 @@ public sealed class CompressionWorkflowService
         string? scanRoot,
         IProgress<WorkflowProgress>? progress,
         CancellationToken cancellationToken,
-        EncoderCapabilitySet? capabilities = null)
+        EncoderCapabilitySet? capabilities = null,
+        EncoderBenchmarkSnapshot? benchmark = null)
         => ProcessFileCoreAsync(
             initialInfo,
             settings,
@@ -53,7 +60,8 @@ public sealed class CompressionWorkflowService
             cancellationToken,
             capabilities,
             plannedPlan: null,
-            plannedCondition: null);
+            plannedCondition: null,
+            benchmark: benchmark);
 
     /// <summary>
     /// Executes the exact plan snapshot shown by the compression task page.
@@ -79,7 +87,8 @@ public sealed class CompressionWorkflowService
         CompressionJob job,
         FFmpegTools tools,
         IProgress<WorkflowProgress>? progress,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        EncoderCapabilitySet? capabilities = null)
     {
         ArgumentNullException.ThrowIfNull(job);
         return job.Plan is null
@@ -91,10 +100,11 @@ public sealed class CompressionWorkflowService
                 job.ScanRoot,
                 progress,
                 cancellationToken,
-                capabilities: null,
+                capabilities: capabilities,
                 plannedPlan: job.Plan,
                 plannedCondition: job.Eligibility,
-                job: job);
+                job: job,
+                benchmark: null);
     }
 
     private async Task<CompressionJobResult> ProcessFileCoreAsync(
@@ -107,7 +117,8 @@ public sealed class CompressionWorkflowService
         EncoderCapabilitySet? capabilities,
         CompressionPlan? plannedPlan,
         ConditionEvaluationResult? plannedCondition,
-        CompressionJob? job = null)
+        CompressionJob? job = null,
+        EncoderBenchmarkSnapshot? benchmark = null)
     {
         string? temporaryOutputPath = null;
         string? passLogPrefix = null;
@@ -119,6 +130,32 @@ public sealed class CompressionWorkflowService
         try
         {
             cancellationToken.ThrowIfCancellationRequested();
+            if (settings.HealthCheckLevel != HealthCheckLevel.Disabled && File.Exists(source.FullPath))
+            {
+                progress?.Report(new WorkflowProgress(VideoTaskStatus.Analyzing, "正在执行源文件健康检查…"));
+                var health = await _healthCheckService.CheckAsync(
+                    tools,
+                    source,
+                    settings.HealthCheckLevel,
+                    cancellationToken).ConfigureAwait(false);
+                source = source.WithHealthCheck(health);
+                if (!health.IsUsable)
+                {
+                    var healthMessage = $"源文件健康检查失败：{health.Message}";
+                    progress?.Report(new WorkflowProgress(
+                        VideoTaskStatus.Failed,
+                        healthMessage,
+                        FailureKind: CompressionFailureKind.SourceCorrupt));
+                    return new CompressionJobResult(
+                        VideoTaskStatus.Failed,
+                        healthMessage,
+                        SourceInfo: source,
+                        FailureKind: CompressionFailureKind.SourceCorrupt,
+                        PlannedEncoder: plannedPlan?.Encoder,
+                        PlanId: plannedPlan?.PlanId);
+                }
+            }
+
             var needsProbeForRules = _ruleEngine.RequiresProbe(settings.Rules);
             var needsProbeForPlan = CompressionPlanner.RequiresSourceProbe(settings);
             if (plannedPlan is null && (needsProbeForRules || needsProbeForPlan) && !source.HasProbeData)
@@ -155,8 +192,78 @@ public sealed class CompressionWorkflowService
                 }
             }
 
-            var plan = plannedPlan ?? _planner.CreatePlan(source, settings, targetSize, capabilities ?? _defaultCapabilities);
+            var plan = plannedPlan ?? _planner.CreatePlan(
+                source,
+                settings,
+                targetSize,
+                capabilities ?? _defaultCapabilities,
+                benchmark);
+            if (plannedPlan is not null &&
+                capabilities is not null &&
+                !capabilities.IsUsable(plan.Encoder, plan.TargetBitDepth))
+            {
+                var reResolvedEncoder = plan.EncoderCandidates
+                    .Where(candidate => capabilities.IsUsable(candidate, plan.TargetBitDepth))
+                    .Select(candidate => (VideoEncoder?)candidate)
+                    .FirstOrDefault();
+                if (reResolvedEncoder is { } resolvedEncoder)
+                {
+                    var originalEncoder = plan.Encoder;
+                    plan = plan.WithEncoder(resolvedEncoder);
+                    DiagnosticLog.Write(
+                        "session",
+                        $"恢复时重新解析编码能力：{originalEncoder} 不可用，改用 {resolvedEncoder}。");
+                }
+            }
             executionPlan = (job ?? CompressionJob.Create(source, settings, ruleResult, scanRoot).WithPlan(plan)).Plan;
+            if (plan.BlocksExecution)
+            {
+                var blockedMessage = plan.BitDepthDecision?.BlocksExecution == true
+                    ? $"位深保护阻止了本次任务：{plan.BitDepthDecision.Warning ?? "目标编码器不支持计划位深。"}"
+                    : plan.StreamAudit?.BlocksExecution == true
+                        ? $"流保留审计阻止了本次任务：{string.Join("；", plan.StreamAudit.Warnings)}"
+                        : plan.Warnings.Count > 0
+                            ? $"当前计划被安全策略阻止执行：{string.Join("；", plan.Warnings)}"
+                            : "当前计划被安全策略阻止执行。";
+                progress?.Report(new WorkflowProgress(
+                    VideoTaskStatus.Failed,
+                    blockedMessage,
+                    Condition: ruleResult,
+                    SmartDecision: plan.SmartDecision,
+                    Encoder: plan.Encoder,
+                    FailureKind: CompressionFailureKind.ValidationFailed));
+                return new CompressionJobResult(
+                    VideoTaskStatus.Failed,
+                    blockedMessage,
+                    SourceInfo: source,
+                    Condition: ruleResult,
+                    SmartDecision: plan.SmartDecision,
+                    Encoder: plan.Encoder,
+                    FailureKind: CompressionFailureKind.ValidationFailed,
+                    PlannedEncoder: plan.Encoder,
+                    PlanId: plan.PlanId);
+            }
+            if (plan.StreamAudit?.BlocksExecution == true)
+            {
+                var compatibilityMessage = $"流保留审计阻止了本次任务：{string.Join("；", plan.StreamAudit.Warnings)}";
+                progress?.Report(new WorkflowProgress(
+                    VideoTaskStatus.Failed,
+                    compatibilityMessage,
+                    Condition: ruleResult,
+                    SmartDecision: plan.SmartDecision,
+                    Encoder: plan.Encoder,
+                    FailureKind: CompressionFailureKind.ValidationFailed));
+                return new CompressionJobResult(
+                    VideoTaskStatus.Failed,
+                    compatibilityMessage,
+                    SourceInfo: source,
+                    Condition: ruleResult,
+                    SmartDecision: plan.SmartDecision,
+                    Encoder: plan.Encoder,
+                    FailureKind: CompressionFailureKind.ValidationFailed,
+                    PlannedEncoder: plan.Encoder,
+                    PlanId: plan.PlanId);
+            }
             if (plannedPlan is null && plan.SmartDecision is { ShouldCompress: false } smartDecision)
             {
                 progress?.Report(new WorkflowProgress(
@@ -178,6 +285,32 @@ public sealed class CompressionWorkflowService
             var warning = plan.Warnings.Count == 0 ? string.Empty : $" 警告：{string.Join("；", plan.Warnings)}";
             pathReservation = ReserveOutputPaths(source, settings, scanRoot, plannedPlan);
             var finalOutputPath = pathReservation.FinalOutputPath;
+            var diskSpace = DiskSpaceGuard.Check(finalOutputPath, source.FileSizeBytes);
+            if (!diskSpace.IsEnough)
+            {
+                progress?.Report(new WorkflowProgress(
+                    VideoTaskStatus.Failed,
+                    diskSpace.Message,
+                    Condition: ruleResult,
+                    SmartDecision: plan.SmartDecision,
+                    Encoder: plan.Encoder,
+                    FailureKind: CompressionFailureKind.DiskSpaceFailure));
+                return new CompressionJobResult(
+                    VideoTaskStatus.Failed,
+                    diskSpace.Message,
+                    SourceInfo: source,
+                    Condition: ruleResult,
+                    SmartDecision: plan.SmartDecision,
+                    Encoder: plan.Encoder,
+                    FailureKind: CompressionFailureKind.DiskSpaceFailure,
+                    PlannedEncoder: plan.Encoder,
+                    PlanId: plan.PlanId);
+            }
+
+            var executionPolicy = LongRunningTaskPolicyResolver.Resolve(
+                settings,
+                capabilities ?? _defaultCapabilities,
+                [plan.Encoder]);
             temporaryOutputPath = _safeFileService.CreateTemporaryOutputPath(finalOutputPath);
             Directory.CreateDirectory(Path.GetDirectoryName(temporaryOutputPath)!);
             passLogPrefix = Path.Combine(Path.GetDirectoryName(temporaryOutputPath)!, $".clvc-pass-{Guid.NewGuid():N}");
@@ -217,7 +350,8 @@ public sealed class CompressionWorkflowService
                         $"前一个编码器未能完成，正在回退到 {EncoderCatalog.Get(candidate).DisplayName}…",
                         Condition: ruleResult,
                         SmartDecision: activePlan.SmartDecision,
-                        Encoder: candidate));
+                        Encoder: candidate,
+                        ResetEta: true));
                 }
 
                 if (activePlan.IsTwoPass)
@@ -227,7 +361,9 @@ public sealed class CompressionWorkflowService
                         activePlan.BuildArguments(source.FullPath, temporaryOutputPath, true, passLogPrefix),
                         source.DurationSeconds,
                         encodingProgress,
-                        cancellationToken);
+                        cancellationToken,
+                        executionPolicy: executionPolicy,
+                        encoder: activePlan.Encoder);
                     if (!firstPass.Succeeded)
                     {
                         CompleteAttempt(attempts, attemptIndex, firstPass, "两遍编码第一遍失败");
@@ -243,7 +379,8 @@ public sealed class CompressionWorkflowService
                                 Condition: ruleResult,
                                 SmartDecision: activePlan.SmartDecision,
                                 Encoder: candidate,
-                                FailureKind: firstPass.FailureKind));
+                                FailureKind: firstPass.FailureKind,
+                                ResetEta: true));
                             _safeFileService.DeleteTemporaryFile(temporaryOutputPath);
                             _safeFileService.DeletePassLogs(passLogPrefix);
                             continue;
@@ -268,7 +405,9 @@ public sealed class CompressionWorkflowService
                     activePlan.BuildArguments(source.FullPath, temporaryOutputPath, false, passLogPrefix),
                     source.DurationSeconds,
                     encodingProgress,
-                    cancellationToken);
+                    cancellationToken,
+                    executionPolicy: executionPolicy,
+                    encoder: activePlan.Encoder);
                 if (encoding.Succeeded)
                 {
                     CompleteAttempt(attempts, attemptIndex, encoding, "编码完成");
@@ -302,7 +441,8 @@ public sealed class CompressionWorkflowService
                     Condition: ruleResult,
                     SmartDecision: activePlan.SmartDecision,
                     Encoder: candidate,
-                    FailureKind: encoding.FailureKind));
+                    FailureKind: encoding.FailureKind,
+                    ResetEta: true));
                 _safeFileService.DeleteTemporaryFile(temporaryOutputPath);
                 _safeFileService.DeletePassLogs(passLogPrefix);
             }
@@ -400,6 +540,7 @@ public sealed class CompressionWorkflowService
             {
                 _safeFileService.FinalizeTemporaryOutput(temporaryOutputPath, finalOutputPath);
                 temporaryOutputPath = null;
+                await StoreVerifiedOutputAsync(tools, finalOutputPath, verification.OutputInfo).ConfigureAwait(false);
             }
             catch (Exception exception)
             {
@@ -536,6 +677,27 @@ public sealed class CompressionWorkflowService
         }
     }
 
+    private async Task StoreVerifiedOutputAsync(
+        FFmpegTools tools,
+        string finalOutputPath,
+        VideoFileInfo? verifiedInfo)
+    {
+        if (verifiedInfo is null)
+        {
+            return;
+        }
+
+        try
+        {
+            var toolVersion = await _ffprobeService.GetToolVersionAsync(tools, CancellationToken.None).ConfigureAwait(false);
+            _probeCache.StoreVerifiedProbe(finalOutputPath, toolVersion, verifiedInfo);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException)
+        {
+            DiagnosticLog.Write("probe-cache", $"保存已验证输出的探测缓存失败：{exception.Message}");
+        }
+    }
+
     private static CompressionJobResult FailedFromFfmpeg(
         FFmpegRunResult run,
         VideoFileInfo source,
@@ -591,7 +753,8 @@ public sealed class CompressionWorkflowService
             Status = status,
             CompletedAt = DateTimeOffset.UtcNow,
             FailureKind = run.Succeeded ? CompressionFailureKind.None : run.FailureKind,
-            Message = message
+            Message = message,
+            AverageSpeed = run.AverageSpeed
         };
     }
 

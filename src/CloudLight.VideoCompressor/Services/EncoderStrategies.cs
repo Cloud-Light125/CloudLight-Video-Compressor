@@ -12,6 +12,7 @@ public interface IEncoderStrategy
     IReadOnlyList<RateControlMode> SupportedRateControls { get; }
     IReadOnlyList<string> SupportedPresets { get; }
     IReadOnlyList<string> SupportedPixelFormats { get; }
+    bool SupportsBitDepth(int bitDepth);
     IReadOnlyList<string> BuildVideoArguments(CompressionPlan plan);
     void Validate(CompressionPlan plan);
 }
@@ -43,6 +44,16 @@ public abstract class EncoderStrategyBase : IEncoderStrategy
     public IReadOnlyList<RateControlMode> SupportedRateControls { get; }
     public IReadOnlyList<string> SupportedPresets { get; }
     public IReadOnlyList<string> SupportedPixelFormats { get; }
+
+    public virtual bool SupportsBitDepth(int bitDepth)
+    {
+        var requiredDepth = bitDepth >= 10 ? 10 : 8;
+        return SupportedPixelFormats.Any(format =>
+        {
+            var depth = BitDepthPolicyResolver.DetectPixelFormatBitDepth(format);
+            return requiredDepth == 8 ? depth == 8 : depth >= requiredDepth;
+        });
+    }
 
     public abstract IReadOnlyList<string> BuildVideoArguments(CompressionPlan plan);
 
@@ -185,6 +196,7 @@ public sealed class NvencEncoderStrategy : EncoderStrategyBase
 
     private static string NvencPreset(string preset) => preset.ToLowerInvariant() switch
     {
+        "p1" or "p2" or "p3" or "p4" or "p5" or "p6" or "p7" => preset.ToLowerInvariant(),
         "ultrafast" or "superfast" or "veryfast" => "p1",
         "faster" or "fast" => "p3",
         "slow" => "p5",
@@ -231,6 +243,7 @@ public sealed class QsvEncoderStrategy : EncoderStrategyBase
 
     private static string QsvPreset(string preset) => preset.ToLowerInvariant() switch
     {
+        "1" or "2" or "3" or "4" or "5" or "6" or "7" => preset,
         "ultrafast" => "7",
         "superfast" => "6",
         "veryfast" => "5",
@@ -250,7 +263,7 @@ public sealed class AmfEncoderStrategy : EncoderStrategyBase
             EncoderVendor.Amd,
             EncoderType.Hardware,
             [RateControlMode.ConstantQuantizer, RateControlMode.QualityVariableBitrate, RateControlMode.VariableBitrate],
-            ["speed", "balanced", "quality"],
+        ["quality", "high_quality"],
             ["nv12", "yuv420p", "p010le", "amf"])
     {
         if (encoder is not (VideoEncoder.H264Amf or VideoEncoder.HevcAmf))
@@ -262,7 +275,14 @@ public sealed class AmfEncoderStrategy : EncoderStrategyBase
     public override IReadOnlyList<string> BuildVideoArguments(CompressionPlan plan)
     {
         Validate(plan);
-        var arguments = new List<string> { "-quality", plan.EncodingPreset.Equals("veryslow", StringComparison.OrdinalIgnoreCase) ? "3" : "2" };
+        var arguments = new List<string>
+        {
+            "-quality",
+            plan.EncodingPreset.Equals("high_quality", StringComparison.OrdinalIgnoreCase) ||
+            plan.EncodingPreset.Equals("3", StringComparison.OrdinalIgnoreCase)
+                ? "3"
+                : "2"
+        };
         if (plan.Mode == CompressionMode.Crf)
         {
             arguments.AddRange(["-rc", "cqp", "-qp_i", Quality(plan.Crf), "-qp_p", Quality(plan.Crf)]);
@@ -305,6 +325,7 @@ public sealed class SvtAv1EncoderStrategy : EncoderStrategyBase
 
     private static string SvtPreset(string preset) => preset.ToLowerInvariant() switch
     {
+        "0" or "2" or "4" or "6" or "8" or "10" or "12" or "13" => preset,
         "ultrafast" => "13",
         "superfast" => "12",
         "veryfast" => "10",

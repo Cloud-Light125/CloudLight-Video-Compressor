@@ -7,7 +7,7 @@ public sealed class OutputPathService
     public string GetOutputPath(VideoFileInfo source, AppSettings settings, string? scanRoot, IEnumerable<string>? reservedPaths = null)
     {
         var outputDirectory = GetOutputDirectory(source, settings, scanRoot);
-        var extension = source.Extension;
+        var extension = GetOutputExtension(source, settings);
         var prefix = ValidateFileNameFragment(settings.OutputPrefix, "压缩文件前缀");
         var suffix = ValidateFileNameFragment(settings.OutputSuffix, "压缩文件后缀");
         var fileName = $"{prefix}{Path.GetFileNameWithoutExtension(source.FileName)}{suffix}{extension}";
@@ -20,6 +20,13 @@ public sealed class OutputPathService
 
         return GetUniquePath(candidate, reservedPaths);
     }
+
+    public static string GetOutputExtension(VideoFileInfo source, AppSettings settings) => settings.OutputContainer switch
+    {
+        OutputContainerMode.Mp4 => ".mp4",
+        OutputContainerMode.Mkv => ".mkv",
+        _ => source.Extension
+    };
 
     public string GetOriginalDestinationPath(
         VideoFileInfo source,

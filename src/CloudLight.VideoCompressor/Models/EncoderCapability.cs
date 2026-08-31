@@ -20,27 +20,72 @@ public sealed record EncoderCapability(
     public IReadOnlyList<RateControlMode> SupportedRateControls { get; init; } = Array.Empty<RateControlMode>();
     public IReadOnlyList<string> SupportedPresets { get; init; } = Array.Empty<string>();
     public IReadOnlyList<string> SupportedPixelFormats { get; init; } = Array.Empty<string>();
+    public IReadOnlyList<int> SupportedBitDepths { get; init; } = Array.Empty<int>();
+    public IReadOnlyList<string> SupportedProfiles { get; init; } = Array.Empty<string>();
+    public bool HelpProbePassed { get; init; }
+    public string? FFmpegVersion { get; init; }
+    public string? CapabilityFingerprint { get; init; }
     public int? MaxResolutionKnown { get; init; }
+
+    public bool SupportsBitDepth(int bitDepth)
+    {
+        var requiredDepth = bitDepth >= 10 ? 10 : 8;
+        if (SupportedBitDepths.Count > 0)
+        {
+            return SupportedBitDepths.Any(depth => requiredDepth == 8 ? depth == 8 : depth >= 10);
+        }
+
+        if (SupportedPixelFormats.Count > 0)
+        {
+            return SupportedPixelFormats.Any(format =>
+            {
+                var depth = BitDepthPolicyResolver.DetectPixelFormatBitDepth(format);
+                return requiredDepth == 8 ? depth == 8 : depth >= requiredDepth;
+            });
+        }
+
+        // Older capability records did not persist pixel-format details. Keep
+        // their conservative 8-bit default, while requiring explicit evidence
+        // before allowing a 10-bit plan.
+        return requiredDepth == 8;
+    }
 }
 
 public sealed class EncoderCapabilitySet
 {
     private readonly IReadOnlyDictionary<VideoEncoder, EncoderCapability> _byEncoder;
 
-    public EncoderCapabilitySet(IEnumerable<EncoderCapability> capabilities)
+    public EncoderCapabilitySet(
+        IEnumerable<EncoderCapability> capabilities,
+        string? ffmpegVersion = null,
+        string? capabilityFingerprint = null)
     {
         Capabilities = capabilities.ToArray();
         _byEncoder = Capabilities
             .GroupBy(capability => capability.Encoder)
             .ToDictionary(group => group.Key, group => group.Last());
+        FFmpegVersion = ffmpegVersion ?? Capabilities.Select(capability => capability.FFmpegVersion)
+            .FirstOrDefault(version => !string.IsNullOrWhiteSpace(version));
+        CapabilityFingerprint = capabilityFingerprint ?? BuildCapabilityFingerprint(Capabilities);
     }
 
     public IReadOnlyList<EncoderCapability> Capabilities { get; }
+    public string? FFmpegVersion { get; }
+    public string CapabilityFingerprint { get; }
 
     public bool IsUsable(VideoEncoder encoder) =>
         _byEncoder.TryGetValue(encoder, out var capability)
             ? capability.IsUsable
             : !EncoderCatalog.Get(encoder).IsHardware;
+
+    public bool IsUsable(VideoEncoder encoder, int targetBitDepth) =>
+        _byEncoder.TryGetValue(encoder, out var capability)
+            ? capability.IsUsable && capability.SupportsBitDepth(targetBitDepth)
+            : !EncoderCatalog.Get(encoder).IsHardware &&
+              EncoderStrategyCatalog.Get(encoder).SupportsBitDepth(targetBitDepth);
+
+    public bool SupportsBitDepth(VideoEncoder encoder, int targetBitDepth) =>
+        IsUsable(encoder, targetBitDepth);
 
     public EncoderCapability? Get(VideoEncoder encoder) =>
         _byEncoder.TryGetValue(encoder, out var capability) ? capability : null;
@@ -73,8 +118,34 @@ public sealed class EncoderCapabilitySet
                 LastProbeTime = DateTimeOffset.UtcNow,
                 SupportedRateControls = EncoderStrategyCatalog.Get(definition.Encoder).SupportedRateControls,
                 SupportedPresets = EncoderStrategyCatalog.Get(definition.Encoder).SupportedPresets,
-                SupportedPixelFormats = EncoderStrategyCatalog.Get(definition.Encoder).SupportedPixelFormats
+                SupportedPixelFormats = EncoderStrategyCatalog.Get(definition.Encoder).SupportedPixelFormats,
+                SupportedBitDepths = SupportedBitDepths(EncoderStrategyCatalog.Get(definition.Encoder).SupportedPixelFormats),
+                SupportedProfiles = DefaultProfiles(definition)
             }));
+
+    private static IReadOnlyList<int> SupportedBitDepths(IReadOnlyList<string> formats) =>
+        formats.Select(BitDepthPolicyResolver.DetectPixelFormatBitDepth)
+            .Where(depth => depth is > 0)
+            .Select(depth => depth!.Value >= 10 ? 10 : 8)
+            .Distinct()
+            .Order()
+            .ToArray();
+
+    private static IReadOnlyList<string> DefaultProfiles(EncoderDefinition definition) =>
+        definition.Codec == VideoCodecKind.H265
+            ? ["main", "main10"]
+            : definition.Codec == VideoCodecKind.H264
+                ? ["main", "high", "high10"]
+                : [];
+
+    private static string BuildCapabilityFingerprint(IEnumerable<EncoderCapability> capabilities) =>
+        string.Join(
+            "|",
+            capabilities
+                .OrderBy(capability => capability.Id, StringComparer.OrdinalIgnoreCase)
+                .Select(capability =>
+                    $"{capability.Id}:{capability.IsSupportedByFfmpeg}:{capability.InitializationTestPassed}:{capability.IsUsable}:" +
+                    $"{string.Join(',', capability.SupportedBitDepths.Order())}:{string.Join(',', capability.SupportedPixelFormats.Order(StringComparer.OrdinalIgnoreCase))}"));
 }
 
 public sealed record EncoderDefinition(

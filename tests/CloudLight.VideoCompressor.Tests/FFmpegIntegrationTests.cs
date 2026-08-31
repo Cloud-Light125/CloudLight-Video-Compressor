@@ -297,7 +297,7 @@ public sealed class FFmpegIntegrationTests
         cancellation.Cancel();
         var result = await task;
 
-        Assert.Equal(VideoTaskStatus.Cancelled, result.Status);
+        Assert.True(result.Status == VideoTaskStatus.Cancelled, result.Message);
         Assert.True(File.Exists(source));
         Assert.False(Directory.Exists(Path.Combine(directory.Path, "高质量")));
         Assert.Empty(Directory.EnumerateFiles(directory.Path, ".*.clvc-*", SearchOption.AllDirectories));

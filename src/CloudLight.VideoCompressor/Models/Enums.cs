@@ -208,6 +208,57 @@ public enum SpeedVsEfficiencyPreference
     Speed
 }
 
+/// <summary>
+/// User-facing encoder effort. This is deliberately separate from the
+/// compression profile: a profile describes the output goal while this value
+/// describes how much encoder computation may be spent reaching that goal.
+/// </summary>
+public enum EncoderTuningPreset
+{
+    [Description("高质量")]
+    HighQuality,
+    [Description("平衡")]
+    Balanced,
+    [Description("快速")]
+    Fast,
+    [Description("极速")]
+    VeryFast
+}
+
+public enum BitDepthPolicy
+{
+    [Description("自动")]
+    Auto,
+    [Description("8-bit")]
+    EightBit,
+    [Description("10-bit")]
+    TenBit
+}
+
+public enum BenchmarkConfidence
+{
+    [Description("未知")]
+    Unknown,
+    [Description("低")]
+    Low,
+    [Description("中")]
+    Medium,
+    [Description("高")]
+    High
+}
+
+public enum VmafComplexityClass
+{
+    [Description("未知复杂度")]
+    Unknown,
+    [Description("低复杂度")]
+    Low,
+    [Description("中复杂度")]
+    Medium,
+    [Description("高复杂度")]
+    High
+}
+
 public enum PipelineStage
 {
     Discover,
@@ -281,6 +332,38 @@ public enum EncoderSelectionMode
     IntelQsv,
     [Description("AMD AMF")]
     AmdAmf
+}
+
+public enum PerformanceMode
+{
+    [Description("自动")]
+    Automatic,
+    [Description("低配置 / 长时间稳定")]
+    LowEndStable,
+    [Description("平衡")]
+    Balanced,
+    [Description("速度优先")]
+    SpeedPriority
+}
+
+public enum ProcessPriorityMode
+{
+    Normal,
+    BelowNormal
+}
+
+public enum SoftwareThreadPolicy
+{
+    EncoderDefault,
+    ReserveSystemCores
+}
+
+public enum EtaConfidence
+{
+    Unknown,
+    Low,
+    Medium,
+    High
 }
 
 public enum EncoderVendor
@@ -363,6 +446,30 @@ public enum OutputLocationMode
     SelectedDirectory,
     [Description("原目录下的自定义子目录")]
     ChildDirectory
+}
+
+public enum OutputContainerMode
+{
+    [Description("保持源容器")]
+    PreserveSource,
+    [Description("MP4")]
+    Mp4,
+    [Description("MKV")]
+    Mkv
+}
+
+public enum CompletionAction
+{
+    [Description("不执行操作")]
+    None,
+    [Description("关闭软件")]
+    CloseApplication,
+    [Description("睡眠")]
+    Sleep,
+    [Description("休眠")]
+    Hibernate,
+    [Description("关闭电脑")]
+    Shutdown
 }
 
 public enum OriginalFileAction

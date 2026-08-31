@@ -11,7 +11,9 @@ public sealed record FFmpegRunResult(
     int ExitCode,
     string ErrorOutput,
     CompressionFailureKind FailureKind = CompressionFailureKind.None,
-    string? FailureMessage = null);
+    string? FailureMessage = null,
+    double? AverageSpeed = null,
+    TimeSpan? Duration = null);
 
 public sealed class FFmpegCancellationTimeoutException : OperationCanceledException
 {
@@ -31,7 +33,9 @@ public sealed class FFmpegService
         double? durationSeconds,
         IProgress<EncodingProgress>? progress,
         CancellationToken cancellationToken,
-        EncoderProgressWatchdog? progressWatchdog = null)
+        EncoderProgressWatchdog? progressWatchdog = null,
+        LongRunningTaskPolicy? executionPolicy = null,
+        VideoEncoder? encoder = null)
     {
         var startInfo = new ProcessStartInfo
         {
@@ -46,24 +50,25 @@ public sealed class FFmpegService
         startInfo.ArgumentList.Add("-progress");
         startInfo.ArgumentList.Add("pipe:1");
         startInfo.ArgumentList.Add("-nostats");
-        foreach (var argument in arguments)
+        foreach (var argument in BuildExecutionArguments(arguments, executionPolicy, encoder))
         {
             startInfo.ArgumentList.Add(argument);
         }
 
         using var process = new Process { StartInfo = startInfo };
-        var errorBuilder = new StringBuilder();
+        var errorTail = new BoundedTextTail(24_000);
         var inputDuration = new InputDuration(durationSeconds);
-        var watchdog = progressWatchdog ?? new EncoderProgressWatchdog();
-        var progressState = new ProgressState();
+        var watchdog = progressWatchdog ?? new EncoderProgressWatchdog(executionPolicy?.WatchdogOptions);
+        var progressState = new ProgressState(executionPolicy);
         using var watchdogCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         var stallSource = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
         process.Start();
         using var trackedProcess = MediaProcessRegistry.Register(process);
         var processId = process.Id;
+        ApplyProcessPriority(process, executionPolicy, encoder);
         using var registration = cancellationToken.Register(() => TryKill(process));
         var progressTask = ReadProgressAsync(process.StandardOutput, inputDuration, progress, watchdog, progressState);
-        var errorTask = ReadErrorAsync(process.StandardError, errorBuilder, inputDuration);
+        var errorTask = ReadErrorAsync(process.StandardError, errorTail, inputDuration);
         var watchdogTask = MonitorWatchdogAsync(process, watchdog, stallSource, watchdogCancellation.Token);
         try
         {
@@ -97,15 +102,25 @@ public sealed class FFmpegService
             throw new IOException("FFmpeg 已退出，但 stdout/stderr 读取未在时限内结束。");
         }
 
+        // A kill can race with WaitForExitAsync: the process may report an
+        // ordinary non-zero exit before the cancellation token is observed by
+        // that await. Preserve the public cancellation contract in that race.
+        if (cancellationToken.IsCancellationRequested)
+        {
+            throw new OperationCanceledException("FFmpeg 已因取消请求终止。", cancellationToken);
+        }
+
         var stalled = stallSource.Task.IsCompletedSuccessfully ? stallSource.Task.Result : null;
         return process.ExitCode == 0 && stalled is null
-            ? new FFmpegRunResult(true, process.ExitCode, errorBuilder.ToString())
+            ? new FFmpegRunResult(true, process.ExitCode, errorTail.ToString(), AverageSpeed: progressState.AverageSpeed, Duration: progressState.Elapsed)
             : new FFmpegRunResult(
                 false,
                 process.ExitCode,
-                CombineError(errorBuilder.ToString(), stalled),
-                stalled is null ? ClassifyFailure(errorBuilder.ToString()) : CompressionFailureKind.EncoderStall,
-                stalled);
+                CombineError(errorTail.ToString(), stalled),
+                stalled is null ? ClassifyFailure(errorTail.ToString()) : CompressionFailureKind.EncoderStall,
+                stalled,
+                progressState.AverageSpeed,
+                progressState.Elapsed);
     }
 
     private static async Task ReadProgressAsync(
@@ -140,9 +155,13 @@ public sealed class FFmpegService
                 continue;
             }
 
-            var progress = CreateProgress(values, inputDuration.Seconds, line.EndsWith("end", StringComparison.OrdinalIgnoreCase), state);
+            var isEnd = line.EndsWith("end", StringComparison.OrdinalIgnoreCase);
+            var progress = CreateProgress(values, inputDuration.Seconds, isEnd, state);
             watchdog.Observe(progress);
-            receiver?.Report(progress);
+            if (receiver is not null && state.ShouldReportUi(progress.LastProgressAt ?? DateTimeOffset.UtcNow, isEnd))
+            {
+                receiver.Report(progress);
+            }
             values.Clear();
         }
     }
@@ -163,7 +182,7 @@ public sealed class FFmpegService
         }
 
         var now = DateTimeOffset.UtcNow;
-        var eta = state.Eta.Update(seconds, durationSeconds, now);
+        var eta = state.Eta.Update(seconds, durationSeconds, now, ParseSpeed(speed));
         var stableRemaining = isEnd ? TimeSpan.Zero : eta.IsStable ? eta.Remaining : null;
         return new EncodingProgress(
             percent,
@@ -177,10 +196,14 @@ public sealed class FFmpegService
             ParseBitrate(values.TryGetValue("bitrate", out var bitrate) ? bitrate : null),
             now - state.StartedAt,
             now,
-            isEnd || eta.IsStable);
+            isEnd || eta.IsStable,
+            false,
+            eta.SmoothedSpeed,
+            eta.SampleCount,
+            eta.Confidence);
     }
 
-    private static async Task ReadErrorAsync(StreamReader reader, StringBuilder destination, InputDuration inputDuration)
+    private static async Task ReadErrorAsync(StreamReader reader, BoundedTextTail destination, InputDuration inputDuration)
     {
         while (true)
         {
@@ -190,16 +213,7 @@ public sealed class FFmpegService
                 break;
             }
 
-            if (destination.Length < 24_000)
-            {
-                var remaining = 24_000 - destination.Length;
-                var appendedLength = Math.Min(line.Length, remaining);
-                destination.Append(line, 0, appendedLength);
-                if (appendedLength == line.Length && destination.Length < 23_999)
-                {
-                    destination.AppendLine();
-                }
-            }
+            destination.AppendLine(line);
 
             if (TryParseInputDuration(line, out var durationSeconds))
             {
@@ -301,6 +315,54 @@ public sealed class FFmpegService
         return double.TryParse(normalized, NumberStyles.Float, CultureInfo.InvariantCulture, out var value) && value >= 0
             ? (long)Math.Round(value * multiplier)
             : null;
+    }
+
+    private static IReadOnlyList<string> BuildExecutionArguments(
+        IReadOnlyList<string> arguments,
+        LongRunningTaskPolicy? policy,
+        VideoEncoder? encoder)
+    {
+        if (policy is null || encoder is null || !policy.ShouldLimitSoftwareThreads(encoder.Value))
+        {
+            return arguments;
+        }
+
+        var result = arguments.ToList();
+        var insertAt = result.FindIndex(argument => string.Equals(argument, "-map", StringComparison.OrdinalIgnoreCase));
+        if (insertAt < 0)
+        {
+            insertAt = Math.Min(2, result.Count);
+        }
+
+        result.InsertRange(insertAt, ["-threads", policy.SoftwareThreadCount!.Value.ToString(CultureInfo.InvariantCulture)]);
+        return result;
+    }
+
+    private static void ApplyProcessPriority(
+        Process process,
+        LongRunningTaskPolicy? policy,
+        VideoEncoder? encoder)
+    {
+        if (policy?.ProcessPriority != ProcessPriorityMode.BelowNormal ||
+            encoder is null ||
+            EncoderCatalog.Get(encoder.Value).IsHardware)
+        {
+            return;
+        }
+
+        try
+        {
+            // Set once at process startup. No other FFmpeg process is looked up
+            // or modified by this application.
+            process.PriorityClass = ProcessPriorityClass.BelowNormal;
+        }
+        catch (Exception exception) when (exception is InvalidOperationException or
+                                          System.ComponentModel.Win32Exception or
+                                          NotSupportedException or
+                                          UnauthorizedAccessException)
+        {
+            DiagnosticLog.Write("ffmpeg", $"无法设置进程优先级为 BelowNormal，继续执行：{exception.Message}");
+        }
     }
 
     private static string CombineError(string error, string? stallReason)
@@ -451,8 +513,70 @@ public sealed class FFmpegService
 
     private sealed class ProgressState
     {
-        public DateTimeOffset StartedAt { get; } = DateTimeOffset.UtcNow;
+        private readonly TimeSpan _uiProgressInterval;
+        private DateTimeOffset _lastUiReportAt = DateTimeOffset.MinValue;
 
-        public EtaCalculator Eta { get; } = new();
+        public ProgressState(LongRunningTaskPolicy? policy)
+        {
+            StartedAt = DateTimeOffset.UtcNow;
+            _uiProgressInterval = policy?.UiProgressInterval ?? TimeSpan.Zero;
+            Eta = policy is null
+                ? new EtaCalculator()
+                : new EtaCalculator(policy.EtaOptions);
+        }
+
+        public DateTimeOffset StartedAt { get; }
+
+        public EtaCalculator Eta { get; }
+
+        public double? AverageSpeed
+        {
+            get
+            {
+                var elapsed = Elapsed.TotalSeconds;
+                var processed = Eta.LastProcessedSeconds;
+                return elapsed > 0 && processed > 0 ? processed / elapsed : Eta.SmoothedSpeed;
+            }
+        }
+
+        public TimeSpan Elapsed => DateTimeOffset.UtcNow - StartedAt;
+
+        public bool ShouldReportUi(DateTimeOffset at, bool force)
+        {
+            if (force || _uiProgressInterval <= TimeSpan.Zero || at - _lastUiReportAt >= _uiProgressInterval)
+            {
+                _lastUiReportAt = at;
+                return true;
+            }
+
+            return false;
+        }
+    }
+
+    private sealed class BoundedTextTail
+    {
+        private readonly int _maximumCharacters;
+        private readonly StringBuilder _builder = new();
+
+        public BoundedTextTail(int maximumCharacters) => _maximumCharacters = Math.Max(1, maximumCharacters);
+
+        public void AppendLine(string line)
+        {
+            _builder.AppendLine(line);
+            if (_builder.Length <= _maximumCharacters)
+            {
+                return;
+            }
+
+            var remove = _builder.Length - _maximumCharacters;
+            _builder.Remove(0, remove);
+            var firstNewLine = _builder.ToString().IndexOf('\n');
+            if (firstNewLine >= 0 && firstNewLine < _builder.Length - 1)
+            {
+                _builder.Remove(0, firstNewLine + 1);
+            }
+        }
+
+        public override string ToString() => _builder.ToString();
     }
 }

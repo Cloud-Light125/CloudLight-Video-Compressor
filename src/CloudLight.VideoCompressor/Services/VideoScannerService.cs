@@ -11,8 +11,20 @@ public sealed class VideoScannerService
     };
 
     private readonly FFprobeService _ffprobeService;
+    private readonly MediaProbeCache _probeCache;
+    private readonly MediaHealthCheckService? _healthCheckService;
 
-    public VideoScannerService(FFprobeService ffprobeService) => _ffprobeService = ffprobeService;
+    public VideoScannerService(
+        FFprobeService ffprobeService,
+        MediaProbeCache? probeCache = null,
+        MediaHealthCheckService? healthCheckService = null)
+    {
+        _ffprobeService = ffprobeService;
+        _probeCache = probeCache ?? new MediaProbeCache();
+        _healthCheckService = healthCheckService ?? new MediaHealthCheckService(_probeCache, _ffprobeService);
+    }
+
+    public MediaProbeCache ProbeCache => _probeCache;
 
     public static bool IsSupportedVideo(string path) => VideoExtensions.Contains(Path.GetExtension(path));
 
@@ -52,7 +64,8 @@ public sealed class VideoScannerService
         Func<VideoFileInfo, Task> onVideo,
         Func<string, string, Task>? onProbeFailure,
         CancellationToken cancellationToken,
-        Func<ScanProgress, Task>? onProgress = null)
+        Func<ScanProgress, Task>? onProgress = null,
+        HealthCheckLevel healthCheckLevel = HealthCheckLevel.Quick)
     {
         // Path enumeration supplies a real denominator without probing files twice.
         var paths = new List<string>();
@@ -63,6 +76,8 @@ public sealed class VideoScannerService
 
         var total = paths.Count;
         var completed = 0;
+        await _probeCache.EnsureLoadedAsync(cancellationToken).ConfigureAwait(false);
+        _probeCache.ResetStatistics();
         if (onProgress is not null)
         {
             await onProgress(new ScanProgress(0, total, null));
@@ -83,7 +98,20 @@ public sealed class VideoScannerService
                         await onProgress(new ScanProgress(Volatile.Read(ref completed), total, path));
                     }
 
-                    var info = await _ffprobeService.ProbeAsync(tools, path, cancellationToken);
+                    var info = (await _probeCache.GetOrProbeAsync(
+                        tools,
+                        path,
+                        _ffprobeService,
+                        cancellationToken).ConfigureAwait(false)).Info;
+                    if (_healthCheckService is not null && healthCheckLevel != HealthCheckLevel.Disabled)
+                    {
+                        var health = await _healthCheckService.CheckAsync(
+                            tools,
+                            info,
+                            healthCheckLevel,
+                            cancellationToken).ConfigureAwait(false);
+                        info = info.WithHealthCheck(health);
+                    }
                     await onVideo(info);
                 }
                 catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -104,7 +132,13 @@ public sealed class VideoScannerService
                     {
                         if (onProgress is not null)
                         {
-                            await onProgress(new ScanProgress(finished, total, path));
+                            var stats = _probeCache.GetStatistics();
+                            await onProgress(new ScanProgress(
+                                finished,
+                                total,
+                                path,
+                                CacheHits: stats.CacheHits,
+                                ActualProbes: stats.ActualProbes));
                         }
                     }
                     finally
@@ -123,9 +157,21 @@ public sealed class VideoScannerService
         }
 
         await Task.WhenAll(pending);
+        _probeCache.PruneStalePaths(paths);
+        await _probeCache.FlushAsync(cancellationToken).ConfigureAwait(false);
         if (onProgress is not null)
         {
-            await onProgress(new ScanProgress(completed, total, null, true));
+            var stats = _probeCache.GetStatistics();
+            DiagnosticLog.Write(
+                "probe-cache",
+                $"CacheHit：扫描完成；命中 {stats.CacheHits}；实际 ffprobe {stats.ActualProbes}；缓存条目 {stats.EntryCount}");
+            await onProgress(new ScanProgress(
+                completed,
+                total,
+                null,
+                true,
+                stats.CacheHits,
+                stats.ActualProbes));
         }
     }
 }

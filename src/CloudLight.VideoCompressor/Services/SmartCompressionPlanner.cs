@@ -17,7 +17,8 @@ public sealed class SmartCompressionPlanner
     public SmartCompressionDecision CreateDecision(
         VideoFileInfo media,
         AppSettings settings,
-        EncoderCapabilitySet? capabilities = null)
+        EncoderCapabilitySet? capabilities = null,
+        EncoderBenchmarkSnapshot? benchmark = null)
     {
         // SmartPreset is the legacy persisted field and is kept synchronized
         // with CompressionProfile. Reading it here also keeps old settings
@@ -25,6 +26,9 @@ public sealed class SmartCompressionPlanner
         var profile = CompressionProfileCatalog.Get(CompressionProfileCatalog.FromLegacy(settings.SmartPreset));
         var preset = settings.SmartPreset;
         var targetCodec = settings.TargetVideoCodec ?? profile.PreferredCodec;
+        var targetBitDepth = BitDepthPolicyResolver.ResolveTargetBitDepth(
+            BitDepthPolicyResolver.DetectBitDepth(media),
+            settings.BitDepthPolicy);
         var targetDimensions = GetTargetDimensions(media, settings, profile);
         var targetWidth = targetDimensions.Width;
         var targetHeight = targetDimensions.Height;
@@ -39,7 +43,16 @@ public sealed class SmartCompressionPlanner
             encoderSettings = settings.Clone();
             encoderSettings.EncoderSelection = profile.PreferredEncoderPolicy;
         }
-        var encoderSelection = EncoderSelectionResolver.Resolve(encoderSettings, targetCodec, capabilities);
+        var encoderSelection = EncoderSelectionResolver.Resolve(
+            encoderSettings,
+            targetCodec,
+            capabilities,
+            benchmark: benchmark,
+            media: media,
+            targetBitDepth: targetBitDepth,
+            tuningPreset: settings.EncoderTuningPreset,
+            profile: settings.CompressionProfile,
+            performanceMode: settings.PerformanceMode);
         var selectedEncoder = encoderSelection.SelectedEncoder;
         var encoderEfficiency = GetEncoderEfficiency(selectedEncoder, profile);
 
@@ -172,7 +185,8 @@ public sealed class SmartCompressionPlanner
             sourceBppf,
             targetBppf,
             bandwidthBudgetBps,
-            encoderEfficiency);
+            encoderEfficiency,
+            encoderSelection.AutoDecision);
     }
 
     private static long GetSourceVideoBitrate(VideoFileInfo media)

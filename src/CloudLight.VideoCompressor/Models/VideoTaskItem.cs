@@ -122,6 +122,17 @@ public sealed class VideoTaskItem : ObservableObject
     public string TotalBitrateDisplay => DisplayFormat.Bitrate(Media.TotalBitrateBps);
     public string VideoCodecDisplay => Media.VideoCodec ?? "—";
     public string AudioDisplay => Media.AudioTrackCount == 0 ? "无" : $"{Media.AudioCodec ?? "未知"} × {Media.AudioTrackCount}";
+    public MediaHealthStatus HealthStatus => Media.HealthStatus;
+    public string HealthStatusDisplay => Media.HealthStatus switch
+    {
+        MediaHealthStatus.Healthy => "健康",
+        MediaHealthStatus.Warning => "警告",
+        MediaHealthStatus.Corrupt => "损坏",
+        _ => "未检查"
+    };
+    public string HealthStatusTooltip => string.IsNullOrWhiteSpace(Media.HealthCheckMessage)
+        ? "尚未执行健康检查。"
+        : Media.HealthCheckMessage;
     public string ConditionDisplay => ConditionResult.State switch
     {
         ConditionResultState.Matches => "符合",
@@ -185,7 +196,8 @@ public sealed class VideoTaskItem : ObservableObject
         nameof(FileName), nameof(FullPath), nameof(FileSizeBytes), nameof(DurationSecondsSort), nameof(ResolutionPixelsSort),
         nameof(FrameRateSort), nameof(VideoBitrateBpsSort), nameof(TotalBitrateBpsSort), nameof(SizeDisplay), nameof(DurationDisplay),
         nameof(ResolutionDisplay), nameof(FpsDisplay), nameof(VideoBitrateDisplay), nameof(TotalBitrateDisplay),
-        nameof(VideoCodecDisplay), nameof(AudioDisplay)
+        nameof(VideoCodecDisplay), nameof(AudioDisplay), nameof(HealthStatus), nameof(HealthStatusDisplay),
+        nameof(HealthStatusTooltip)
     ];
 }
 
@@ -215,5 +227,26 @@ public static class DisplayFormat
         }
 
         return TimeSpan.FromSeconds(seconds.Value).ToString(seconds.Value >= 3600 ? @"h\:mm\:ss" : @"m\:ss");
+    }
+
+    public static string EstimatedDuration(TimeSpan duration)
+    {
+        var seconds = Math.Max(0, (long)Math.Round(duration.TotalSeconds));
+        if (seconds < 60)
+        {
+            return $"约 {seconds} 秒";
+        }
+
+        var span = TimeSpan.FromSeconds(seconds);
+        if (span.TotalHours >= 1)
+        {
+            return span.Minutes == 0
+                ? $"约 {span.Hours + span.Days * 24} 小时"
+                : $"约 {span.Hours + span.Days * 24} 小时 {span.Minutes} 分钟";
+        }
+
+        return span.Seconds == 0
+            ? $"约 {span.Minutes} 分钟"
+            : $"约 {span.Minutes} 分钟 {span.Seconds} 秒";
     }
 }

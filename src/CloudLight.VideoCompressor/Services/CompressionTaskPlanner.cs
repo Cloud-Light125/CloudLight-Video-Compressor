@@ -16,6 +16,8 @@ public sealed class CompressionTaskPlanner
     private readonly TargetSizeCalculator _targetSizeCalculator;
     private readonly OutputPathService _outputPathService;
     private readonly VmafQualityCalibrationService? _qualityCalibrationService;
+    private readonly MediaProbeCache? _probeCache;
+    private readonly CompressionResultCache? _resultCache;
 
     public CompressionTaskPlanner(
         RuleEngine ruleEngine,
@@ -23,7 +25,9 @@ public sealed class CompressionTaskPlanner
         CompressionPlanner compressionPlanner,
         TargetSizeCalculator targetSizeCalculator,
         OutputPathService outputPathService,
-        VmafQualityCalibrationService? qualityCalibrationService = null)
+        VmafQualityCalibrationService? qualityCalibrationService = null,
+        MediaProbeCache? probeCache = null,
+        CompressionResultCache? resultCache = null)
     {
         _ruleEngine = ruleEngine;
         _ffprobeService = ffprobeService;
@@ -31,7 +35,11 @@ public sealed class CompressionTaskPlanner
         _targetSizeCalculator = targetSizeCalculator;
         _outputPathService = outputPathService;
         _qualityCalibrationService = qualityCalibrationService;
+        _probeCache = probeCache;
+        _resultCache = resultCache;
     }
+
+    public CompressionResultCache? ResultCache => _resultCache;
 
     public async Task<CompressionTaskSession> CreateSessionAsync(
         IEnumerable<VideoTaskItem> candidates,
@@ -39,7 +47,8 @@ public sealed class CompressionTaskPlanner
         string scanRoot,
         FFmpegTools tools,
         EncoderCapabilitySet capabilities,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        EncoderBenchmarkSnapshot? benchmark = null)
     {
         var settingsSnapshot = settings.Clone();
         var entries = new List<CompressionTaskEntry>();
@@ -52,7 +61,9 @@ public sealed class CompressionTaskPlanner
             var source = item.Media;
             if (!source.HasProbeData)
             {
-                source = await _ffprobeService.ProbeAsync(tools, source.FullPath, cancellationToken).ConfigureAwait(false);
+                source = _probeCache is null
+                    ? await _ffprobeService.ProbeAsync(tools, source.FullPath, cancellationToken).ConfigureAwait(false)
+                    : (await _probeCache.GetOrProbeAsync(tools, source.FullPath, _ffprobeService, cancellationToken).ConfigureAwait(false)).Info;
             }
 
             var condition = _ruleEngine.Evaluate(source, settingsSnapshot.Rules);
@@ -83,7 +94,7 @@ public sealed class CompressionTaskPlanner
                 }
             }
 
-            var plan = _compressionPlanner.CreatePlan(source, settingsSnapshot, targetSize, capabilities);
+            var plan = _compressionPlanner.CreatePlan(source, settingsSnapshot, targetSize, capabilities, benchmark);
             if (plan.SmartDecision is { ShouldCompress: false } decision)
             {
                 // Keep the scan result visible on the main page. A smart skip is
@@ -96,15 +107,23 @@ public sealed class CompressionTaskPlanner
                 continue;
             }
 
-            if (settingsSnapshot.EnableAdvancedQualityCalibration && _qualityCalibrationService is not null)
+            if (settingsSnapshot.EnableAdvancedQualityCalibration)
             {
-                var calibration = await _qualityCalibrationService.CalibrateAsync(
-                    source,
-                    settingsSnapshot,
-                    plan.Encoder,
-                    tools,
-                    cancellationToken).ConfigureAwait(false);
-                if (calibration.IsAvailable)
+                var cachedCalibration = _resultCache?.TryGet(source, settingsSnapshot, out var cachedResult) == true
+                    ? cachedResult.VmafCalibrationResult
+                    : null;
+                var calibration = cachedCalibration;
+                if (calibration is null && _qualityCalibrationService is not null)
+                {
+                    calibration = await _qualityCalibrationService.CalibrateAsync(
+                        source,
+                        settingsSnapshot,
+                        plan.Encoder,
+                        tools,
+                        cancellationToken).ConfigureAwait(false);
+                }
+
+                if (calibration is { IsAvailable: true })
                 {
                     var calibratedBitrate = calibration.SelectedBitrateBps ?? plan.TargetVideoBitrateBps;
                     var calibratedMaximum = calibration.SelectedBitrateBps is > 0
@@ -124,8 +143,9 @@ public sealed class CompressionTaskPlanner
                             }
                             : null
                     };
+                    _resultCache?.Set(source, settingsSnapshot, plan.SmartDecision, calibration);
                 }
-                else
+                else if (calibration is not null)
                 {
                     plan = plan with
                     {
@@ -140,7 +160,9 @@ public sealed class CompressionTaskPlanner
             var targetCodec = plan.SmartDecision?.TargetCodec
                 ?? settingsSnapshot.TargetVideoCodec
                 ?? CodecFromEncoder(plan.Encoder);
-            var reason = plan.SmartDecision?.Reason ?? "符合当前压缩条件，按已设置的压缩参数执行。";
+            var reason = plan.AutoEncoderDecision?.Reason ??
+                         plan.SmartDecision?.Reason ??
+                         "符合当前压缩条件，按已设置的压缩参数执行。";
             plan = plan with
             {
                 SourcePath = source.FullPath,
@@ -164,7 +186,11 @@ public sealed class CompressionTaskPlanner
             entries.Add(new CompressionTaskEntry(source, plan, condition, comparison, job));
         }
 
-        return new CompressionTaskSession(entries, settingsSnapshot, scanRoot, planningNotes);
+        var executionPolicy = LongRunningTaskPolicyResolver.Resolve(
+            settingsSnapshot,
+            capabilities,
+            entries.Select(entry => entry.Plan.Encoder));
+        return new CompressionTaskSession(entries, settingsSnapshot, scanRoot, planningNotes, executionPolicy);
     }
 
     private static (long? ExactBytes, long? LowerBoundBytes, long? UpperBoundBytes) EstimateOutput(
@@ -244,6 +270,13 @@ public sealed class CompressionTaskPlanner
                 ? CompressionParameterChangeType.Unchanged
                 : CompressionParameterChangeType.Converted),
             Change("视频编码器", source.VideoCodec ?? "未知", targetEncoder, CompressionParameterChangeType.Converted),
+            Change("编码倾向", "源文件", plan.EncoderTuningPreset.GetDescription(), CompressionParameterChangeType.Changed),
+            Change("位深 / HDR", source.HdrSummaryDisplay,
+                plan.IsHdrSource ? $"{plan.TargetBitDepth}-bit · HDR 保护" : $"{plan.TargetBitDepth}-bit SDR",
+                source.IsHdr == plan.IsHdrSource && (source.BitDepth ?? 8) == plan.TargetBitDepth
+                    ? CompressionParameterChangeType.Unchanged
+                    : CompressionParameterChangeType.Changed),
+            Change("目标 profile", source.VideoProfile ?? "源文件", plan.TargetProfile ?? "默认", CompressionParameterChangeType.Changed),
             Change("分辨率", sourceResolution, targetResolution, sourceResolution == targetResolution
                 ? CompressionParameterChangeType.Unchanged
                 : CompressionParameterChangeType.Reduced),
@@ -263,6 +296,9 @@ public sealed class CompressionTaskPlanner
                 ? CompressionParameterChangeType.Copied
                 : GetNumericChange(source.AudioBitrateBps, plan.AudioBitrateKbps * 1_000L)),
             Change("音轨数量", source.AudioTrackCount.ToString(), source.AudioTrackCount.ToString(), CompressionParameterChangeType.Unchanged),
+            Change("封面图", source.Streams.Count(stream => stream.IsAttachedPicture).ToString(),
+                (plan.StreamAudit?.AttachedPictureCount ?? source.Streams.Count(stream => stream.IsAttachedPicture)).ToString(),
+                CompressionParameterChangeType.Copied),
             Change("硬件 / 软件", "源文件", EncoderCatalog.Get(plan.Encoder).IsHardware ? "GPU 硬件编码" : "CPU 软件编码", CompressionParameterChangeType.Converted),
             Change("文件大小", DisplayFormat.FileSize(source.FileSizeBytes), plan.EstimatedOutputDisplay, CompressionParameterChangeType.Changed)
         };

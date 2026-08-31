@@ -1,3 +1,5 @@
+using CloudLight.VideoCompressor.Services;
+
 namespace CloudLight.VideoCompressor.Models;
 
 /// <summary>
@@ -26,7 +28,8 @@ public sealed record SmartCompressionDecision(
     double? SourceBitsPerPixelPerFrame = null,
     double? TargetBitsPerPixelPerFrame = null,
     double? BandwidthBudgetBps = null,
-    double EncoderEfficiency = 1)
+    double EncoderEfficiency = 1,
+    AutoEncoderDecision? AutoEncoderDecision = null)
 {
     public string DecisionDisplay => ShouldCompress ? "建议压缩" : "智能跳过";
 

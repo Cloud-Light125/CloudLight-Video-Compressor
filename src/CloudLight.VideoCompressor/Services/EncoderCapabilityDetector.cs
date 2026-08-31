@@ -6,13 +6,16 @@ public sealed class EncoderCapabilityDetector
 {
     private readonly FFmpegLocator _ffmpegLocator;
     private readonly HardwareEncoderProbe _hardwareEncoderProbe;
+    private readonly EncoderHelpProbe _encoderHelpProbe;
 
     public EncoderCapabilityDetector(
         FFmpegLocator? ffmpegLocator = null,
-        HardwareEncoderProbe? hardwareEncoderProbe = null)
+        HardwareEncoderProbe? hardwareEncoderProbe = null,
+        EncoderHelpProbe? encoderHelpProbe = null)
     {
         _ffmpegLocator = ffmpegLocator ?? new FFmpegLocator();
         _hardwareEncoderProbe = hardwareEncoderProbe ?? new HardwareEncoderProbe();
+        _encoderHelpProbe = encoderHelpProbe ?? new EncoderHelpProbe();
     }
 
     public async Task<EncoderCapabilitySet> DetectAsync(
@@ -51,6 +54,32 @@ public sealed class EncoderCapabilityDetector
             }
 
             DiagnosticLog.Write("encoder-detect", $"{definition.Id}: present");
+            EncoderHelpProbeResult help;
+            try
+            {
+                help = await _encoderHelpProbe.ProbeAsync(tools, definition.Encoder, cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception exception)
+            {
+                help = new EncoderHelpProbeResult(false, [], strategy.SupportedPresets, [], [], exception.Message);
+            }
+
+            var supportedFormats = help.SupportedPixelFormats.Count > 0
+                ? help.SupportedPixelFormats
+                : strategy.SupportedPixelFormats;
+            var supportedBitDepths = help.SupportedBitDepths.Count > 0
+                ? help.SupportedBitDepths
+                : GetSupportedBitDepths(supportedFormats);
+            var supportedProfiles = help.SupportedProfiles.Count > 0
+                ? help.SupportedProfiles
+                : DefaultProfiles(definition, supportedBitDepths);
+            var supportedPresets = help.SupportedPresets.Count > 0
+                ? help.SupportedPresets
+                : strategy.SupportedPresets;
             if (!definition.IsHardware)
             {
                 capabilities.Add(new EncoderCapability(
@@ -67,8 +96,13 @@ public sealed class EncoderCapabilityDetector
                     InitializationTestPassed = true,
                     LastProbeTime = probeTime,
                     SupportedRateControls = strategy.SupportedRateControls,
-                    SupportedPresets = strategy.SupportedPresets,
-                    SupportedPixelFormats = strategy.SupportedPixelFormats
+                    SupportedPresets = supportedPresets,
+                    SupportedPixelFormats = supportedFormats,
+                    SupportedBitDepths = supportedBitDepths,
+                    SupportedProfiles = supportedProfiles,
+                    HelpProbePassed = help.Succeeded,
+                    FFmpegVersion = listed.Version,
+                    CapabilityFingerprint = string.Join(",", supportedFormats)
                 });
                 continue;
             }
@@ -88,6 +122,34 @@ public sealed class EncoderCapabilityDetector
                 // hardware encoder from the settings page.
                 smoke = new HardwareEncoderProbeResult(false, exception.Message);
             }
+            if (smoke.IsUsable && supportedBitDepths.Contains(10))
+            {
+                try
+                {
+                    var tenBit = await _hardwareEncoderProbe.ProbeAsync(tools, definition.Encoder, cancellationToken, 10).ConfigureAwait(false);
+                    if (!tenBit.IsUsable)
+                    {
+                        supportedBitDepths = supportedBitDepths.Where(depth => depth != 10).ToArray();
+                        DiagnosticLog.Write("encoder-detect", $"{definition.Id} 10-bit smoke test failed: {tenBit.Error}");
+                    }
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch (Exception exception)
+                {
+                    supportedBitDepths = supportedBitDepths.Where(depth => depth != 10).ToArray();
+                    DiagnosticLog.Write("encoder-detect", $"{definition.Id} 10-bit smoke test failed: {exception.Message}");
+                }
+            }
+            if (smoke.IsUsable && !supportedBitDepths.Contains(8))
+            {
+                // The ordinary smoke command is an 8-bit input/output probe.
+                // Keep that direct evidence even when a vendor help response
+                // lists only its high-bit-depth formats.
+                supportedBitDepths = supportedBitDepths.Append(8).Order().ToArray();
+            }
             var capability = new EncoderCapability(
                 definition.Id,
                 definition.DisplayName,
@@ -102,8 +164,13 @@ public sealed class EncoderCapabilityDetector
                 InitializationTestPassed = smoke.IsUsable,
                 LastProbeTime = probeTime,
                 SupportedRateControls = strategy.SupportedRateControls,
-                SupportedPresets = strategy.SupportedPresets,
-                SupportedPixelFormats = strategy.SupportedPixelFormats
+                SupportedPresets = supportedPresets,
+                SupportedPixelFormats = supportedFormats,
+                SupportedBitDepths = supportedBitDepths,
+                SupportedProfiles = supportedProfiles,
+                HelpProbePassed = help.Succeeded,
+                FFmpegVersion = listed.Version,
+                CapabilityFingerprint = string.Join(",", supportedFormats)
             };
             capabilities.Add(capability);
             DiagnosticLog.Write(
@@ -111,6 +178,23 @@ public sealed class EncoderCapabilityDetector
                 $"{definition.Id} smoke test: {(smoke.IsUsable ? "success" : $"unavailable: {capability.UnavailableReason}")}");
         }
 
-        return new EncoderCapabilitySet(capabilities);
+        return new EncoderCapabilitySet(capabilities, listed.Version);
     }
+
+    private static IReadOnlyList<int> GetSupportedBitDepths(IReadOnlyList<string> formats) =>
+        formats.Select(BitDepthPolicyResolver.DetectPixelFormatBitDepth)
+            .Where(depth => depth is > 0)
+            .Select(depth => depth!.Value >= 10 ? 10 : 8)
+            .Distinct()
+            .Order()
+            .ToArray();
+
+    private static IReadOnlyList<string> DefaultProfiles(
+        EncoderDefinition definition,
+        IReadOnlyList<int> supportedBitDepths) =>
+        definition.Codec == VideoCodecKind.H265
+            ? supportedBitDepths.Contains(10) ? ["main", "main10"] : ["main"]
+            : definition.Codec == VideoCodecKind.H264
+                ? supportedBitDepths.Contains(10) ? ["high", "high10"] : ["high"]
+                : [];
 }

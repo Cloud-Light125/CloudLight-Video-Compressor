@@ -401,8 +401,11 @@
                            Grid.ColumnSpan="5"
                            Margin="0,8,0,0"
                            Foreground="#334A7D"
-                           Text="主页面负责扫描、条件判断与参数设置；确认后的 FFmpeg 执行进度、验证和结果会在“压缩任务”页面显示。"
-                           TextTrimming="CharacterEllipsis" />
+                           TextTrimming="CharacterEllipsis">
+                    <Run Text="{Binding ScanProbeSummaryDisplay, Mode=OneWay}" />
+                    <Run Text=" · " />
+                    <Run Text="主页面负责扫描、条件判断与参数设置；确认后的 FFmpeg 执行进度、验证和结果会在“压缩任务”页面显示。" />
+                </TextBlock>
             </Grid>
         </Border>
 
@@ -543,6 +546,17 @@
                                 <DataGridTextColumn.CellStyle>
                                     <Style TargetType="DataGridCell" BasedOn="{StaticResource DataGridCellStyle}">
                                         <Setter Property="ToolTip" Value="{Binding ConditionTooltip}" />
+                                    </Style>
+                                </DataGridTextColumn.CellStyle>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Header="健康"
+                                                Width="78"
+                                                IsReadOnly="True"
+                                                SortMemberPath="HealthStatus"
+                                                Binding="{Binding HealthStatusDisplay}">
+                                <DataGridTextColumn.CellStyle>
+                                    <Style TargetType="DataGridCell" BasedOn="{StaticResource DataGridCellStyle}">
+                                        <Setter Property="ToolTip" Value="{Binding HealthStatusTooltip}" />
                                     </Style>
                                 </DataGridTextColumn.CellStyle>
                             </DataGridTextColumn>
@@ -929,11 +943,12 @@
                                                 <ColumnDefinition Width="112" />
                                                 <ColumnDefinition Width="*" />
                                             </Grid.ColumnDefinitions>
-                                            <TextBlock Grid.Column="0" Text="编码预设" Style="{StaticResource FieldLabelStyle}" />
+                                            <TextBlock Grid.Column="0" Text="编码倾向" Style="{StaticResource FieldLabelStyle}" />
                                             <ComboBox Grid.Column="1"
                                                       Style="{StaticResource SelectStyle}"
-                                                      ItemsSource="{Binding EncodingPresets}"
-                                                      SelectedItem="{Binding Settings.EncodingPreset, Mode=TwoWay}" />
+                                                      ItemsSource="{Binding EncoderTuningPresets}"
+                                                      SelectedItem="{Binding Settings.EncoderTuningPreset, Mode=TwoWay}"
+                                                      ToolTip="高质量、平衡、快速、极速会映射为当前编码器实际支持的 preset。" />
                                         </Grid>
                                         <Grid Margin="0,0,0,8">
                                             <Grid.ColumnDefinitions>
@@ -945,6 +960,18 @@
                                                       Style="{StaticResource SelectStyle}"
                                                       ItemsSource="{Binding OutputVideoCodecs}"
                                                       SelectedItem="{Binding Settings.SelectedVideoCodec, Mode=TwoWay}" />
+                                        </Grid>
+                                        <Grid Margin="0,0,0,8">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="112" />
+                                                <ColumnDefinition Width="*" />
+                                            </Grid.ColumnDefinitions>
+                                            <TextBlock Grid.Column="0" Text="位深 / HDR" Style="{StaticResource FieldLabelStyle}" />
+                                            <ComboBox Grid.Column="1"
+                                                      Style="{StaticResource SelectStyle}"
+                                                      ItemsSource="{Binding BitDepthPolicies}"
+                                                      SelectedItem="{Binding Settings.BitDepthPolicy, Mode=TwoWay}"
+                                                      ToolTip="自动会保留检测到的 10-bit/Main10/HDR；8-bit 选项会提示可能的色阶或 HDR 信息损失。" />
                                         </Grid>
                                         <Grid>
                                             <Grid.ColumnDefinitions>
@@ -1083,6 +1110,21 @@
                                                 <ColumnDefinition Width="112" />
                                                 <ColumnDefinition Width="*" />
                                             </Grid.ColumnDefinitions>
+                                            <TextBlock Grid.Column="0" Text="目标容器" Style="{StaticResource FieldLabelStyle}" />
+                                            <ComboBox Grid.Column="1"
+                                                      Style="{StaticResource SelectStyle}"
+                                                      ItemsSource="{Binding OutputContainers}"
+                                                      SelectedItem="{Binding Settings.OutputContainer, Mode=TwoWay}" />
+                                        </Grid>
+                                        <TextBlock Margin="112,0,0,8"
+                                                   Foreground="{StaticResource MutedTextBrush}"
+                                                   TextWrapping="Wrap"
+                                                   Text="MP4 会提前审计字幕、附件和数据流；无法安全保留的流会在任务页警告并阻止执行。" />
+                                        <Grid Margin="0,0,0,8">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="112" />
+                                                <ColumnDefinition Width="*" />
+                                            </Grid.ColumnDefinitions>
                                             <TextBlock Grid.Column="0" Text="位置模式" Style="{StaticResource FieldLabelStyle}" />
                                             <ComboBox Grid.Column="1"
                                                       Style="{StaticResource SelectStyle}"
@@ -1210,9 +1252,29 @@
                                            Foreground="{StaticResource MutedTextBrush}"
                                            TextWrapping="Wrap"
                                            Text="扩展名始终保留在最后；同名文件会自动使用 (1)、(2)…，不会无提示覆盖。" />
-                                <GroupBox Header="工具与并发" Style="{StaticResource SectionGroupStyle}">
+                                <GroupBox Header="源文件健康检查" Style="{StaticResource SectionGroupStyle}">
+                                    <Grid>
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="112" />
+                                            <ColumnDefinition Width="*" />
+                                        </Grid.ColumnDefinitions>
+                                        <TextBlock Grid.Column="0" Text="检查级别" Style="{StaticResource FieldLabelStyle}" />
+                                        <StackPanel Grid.Column="1">
+                                            <ComboBox Style="{StaticResource SelectStyle}"
+                                                      ItemsSource="{Binding HealthCheckLevels}"
+                                                      SelectedItem="{Binding Settings.HealthCheckLevel, Mode=TwoWay}" />
+                                            <TextBlock Margin="0,5,0,0"
+                                                       Foreground="{StaticResource MutedTextBrush}"
+                                                       TextWrapping="Wrap"
+                                                       Text="快速使用 ffprobe 检查视频流、时长和分辨率；深度会实际解码视频与音频到 null。默认快速，健康结果按源文件 fingerprint 缓存。" />
+                                        </StackPanel>
+                                    </Grid>
+                                </GroupBox>
+                                 <GroupBox Header="工具与并发" Style="{StaticResource SectionGroupStyle}">
                                     <Grid>
                                         <Grid.RowDefinitions>
+                                            <RowDefinition Height="Auto" />
+                                            <RowDefinition Height="Auto" />
                                             <RowDefinition Height="Auto" />
                                             <RowDefinition Height="Auto" />
                                             <RowDefinition Height="Auto" />
@@ -1241,7 +1303,98 @@
                                             <TextBlock DockPanel.Dock="Right" Text="1 - 4（默认 1）" Margin="8,0,0,0" VerticalAlignment="Center" Foreground="{StaticResource MutedTextBrush}" />
                                             <TextBox Style="{StaticResource InputStyle}" Text="{Binding Settings.CompressionConcurrency, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
                                         </DockPanel>
+                                        <TextBlock Grid.Row="3" Grid.Column="0" Text="性能模式" Style="{StaticResource FieldLabelStyle}" />
+                                        <ComboBox Grid.Row="3" Grid.Column="1"
+                                                  Style="{StaticResource SelectStyle}"
+                                                  ItemsSource="{Binding PerformanceModes}"
+                                                  SelectedItem="{Binding Settings.PerformanceMode, Mode=TwoWay}"
+                                                  ToolTip="自动根据 CPU、系统内存和已验证的硬件编码能力选择稳妥策略。" />
+                                        <TextBlock Grid.Row="4" Grid.Column="1"
+                                                   Text="自动：根据电脑和编码方式选择稳妥资源策略；低配置 / 长时间稳定：减少并发和后台竞争；平衡：兼顾响应与速度；速度优先：允许更高资源占用。"
+                                                   Foreground="{StaticResource MutedTextBrush}"
+                                                   TextWrapping="Wrap"
+                                                   Margin="0,3,0,0" />
+                                        <CheckBox Grid.Row="4" Grid.Column="2"
+                                                  Content="压缩期间防止电脑自动睡眠"
+                                                  VerticalAlignment="Center"
+                                                  Margin="12,3,0,0"
+                                                  IsChecked="{Binding Settings.PreventSleepDuringCompression, Mode=TwoWay}"
+                                                  ToolTip="仅在任务运行期间保持系统唤醒，不阻止显示器关闭，不修改 Windows 电源计划。" />
                                     </Grid>
+                                 </GroupBox>
+                                 <GroupBox Header="编码性能参考" Style="{StaticResource SectionGroupStyle}">
+                                     <StackPanel>
+                                         <TextBlock Text="Benchmark 使用本机 FFmpeg 的合成测试画面，覆盖 1080p30 与 4K60；不会上传文件，也不会自动在启动时运行。结果用于解释 Auto 编码器选择。"
+                                                    TextWrapping="Wrap"
+                                                    Foreground="{StaticResource MutedTextBrush}"
+                                                    Margin="0,0,0,8" />
+                                         <DockPanel Margin="0,0,0,7">
+                                             <Button DockPanel.Dock="Right"
+                                                     Content="取消测试"
+                                                     Command="{Binding CancelBenchmarkCommand}"
+                                                     Style="{StaticResource DangerButtonStyle}" />
+                                             <Button DockPanel.Dock="Right"
+                                                     Content="测试本机编码性能"
+                                                     Command="{Binding RunBenchmarkCommand}"
+                                                     Style="{StaticResource PrimaryButtonStyle}" />
+                                             <TextBlock Text="{Binding BenchmarkStatusDisplay}"
+                                                        VerticalAlignment="Center"
+                                                        TextWrapping="Wrap"
+                                                        Foreground="{StaticResource MutedTextBrush}" />
+                                         </DockPanel>
+                                         <ProgressBar Height="8"
+                                                      Minimum="0"
+                                                      Maximum="100"
+                                                      Value="{Binding BenchmarkProgressPercent, Mode=OneWay}"
+                                                      Margin="0,0,0,4" />
+                                         <TextBlock Text="{Binding BenchmarkProgressDisplay}"
+                                                    Foreground="{StaticResource MutedTextBrush}"
+                                                    Margin="0,0,0,7" />
+                                         <ItemsControl ItemsSource="{Binding BenchmarkRows}">
+                                             <ItemsControl.ItemTemplate>
+                                                 <DataTemplate>
+                                                     <Grid Margin="0,2">
+                                                         <Grid.ColumnDefinitions>
+                                                             <ColumnDefinition Width="230" />
+                                                             <ColumnDefinition Width="*" />
+                                                         </Grid.ColumnDefinitions>
+                                                         <TextBlock Grid.Column="0"
+                                                                    Text="{Binding DisplayName}"
+                                                                    FontWeight="SemiBold" />
+                                                         <TextBlock Grid.Column="1"
+                                                                    Text="{Binding StatusDisplay}"
+                                                                    TextWrapping="Wrap"
+                                                                    Foreground="{StaticResource MutedTextBrush}" />
+                                                     </Grid>
+                                                 </DataTemplate>
+                                             </ItemsControl.ItemTemplate>
+                                         </ItemsControl>
+                                     </StackPanel>
+                                 </GroupBox>
+                                 <GroupBox Header="全部任务完成后的操作" Style="{StaticResource SectionGroupStyle}">
+                                    <StackPanel>
+                                        <Grid>
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="112" />
+                                                <ColumnDefinition Width="*" />
+                                            </Grid.ColumnDefinitions>
+                                            <TextBlock Grid.Column="0" Text="完成后" Style="{StaticResource FieldLabelStyle}" />
+                                            <ComboBox Grid.Column="1"
+                                                      Style="{StaticResource SelectStyle}"
+                                                      ItemsSource="{Binding CompletionActions}"
+                                                      SelectedItem="{Binding Settings.CompletionAction, Mode=TwoWay}" />
+                                        </Grid>
+                                        <CheckBox Margin="112,8,0,0"
+                                                  Content="有失败或取消时不执行睡眠、休眠或关机（推荐）"
+                                                  IsChecked="{Binding Settings.DoNotPowerOffOnFailure, Mode=TwoWay}" />
+                                        <CheckBox Margin="112,8,0,0"
+                                                  Content="我确认已了解，所有任务结束后执行上面的操作"
+                                                  IsChecked="{Binding Settings.CompletionActionConfirmed, Mode=TwoWay}" />
+                                        <TextBlock Margin="112,6,0,0"
+                                                   Foreground="#795B16"
+                                                   TextWrapping="Wrap"
+                                                   Text="睡眠、休眠和关机会在全部任务进入终态后执行，并在任务页提供 30 秒倒计时；首次选择危险操作时请确认。" />
+                                    </StackPanel>
                                 </GroupBox>
                             </StackPanel>
                         </ScrollViewer>

@@ -1,4 +1,5 @@
 using System.Globalization;
+using CloudLight.VideoCompressor.Infrastructure;
 using CloudLight.VideoCompressor.Models;
 
 namespace CloudLight.VideoCompressor.Services;
@@ -6,24 +7,38 @@ namespace CloudLight.VideoCompressor.Services;
 public sealed class CompressionPlanner
 {
     private readonly SmartCompressionPlanner _smartCompressionPlanner;
+    private readonly CompressionResultCache? _resultCache;
+    private readonly ContainerCompatibilityPolicy _containerCompatibilityPolicy;
 
-    public CompressionPlanner(SmartCompressionPlanner? smartCompressionPlanner = null) =>
+    public CompressionPlanner(
+        SmartCompressionPlanner? smartCompressionPlanner = null,
+        CompressionResultCache? resultCache = null,
+        ContainerCompatibilityPolicy? containerCompatibilityPolicy = null)
+    {
         _smartCompressionPlanner = smartCompressionPlanner ?? new SmartCompressionPlanner();
+        _resultCache = resultCache;
+        _containerCompatibilityPolicy = containerCompatibilityPolicy ?? new ContainerCompatibilityPolicy();
+    }
+
+    public CompressionResultCache? ResultCache => _resultCache;
 
     public CompressionPlan CreatePlan(
         VideoFileInfo media,
         AppSettings settings,
         TargetSizeCalculation? targetSizeCalculation = null,
-        EncoderCapabilitySet? capabilities = null)
+        EncoderCapabilitySet? capabilities = null,
+        EncoderBenchmarkSnapshot? benchmark = null)
     {
         var warnings = new List<string>();
         var targetCodec = settings.TargetVideoCodec ?? LegacyCodec(settings.VideoEncoder);
+        var targetBitDepth = BitDepthPolicyResolver.ResolveTargetBitDepth(
+            BitDepthPolicyResolver.DetectBitDepth(media),
+            settings.BitDepthPolicy);
         SmartCompressionDecision? smartDecision = null;
         EncoderSelectionResult selection;
 
         if (settings.CompressionMode == CompressionMode.SmartAutomatic)
         {
-            smartDecision = _smartCompressionPlanner.CreateDecision(media, settings, capabilities);
             var smartSettings = settings;
             if (settings.EncoderSelection is null)
             {
@@ -31,17 +46,81 @@ public sealed class CompressionPlanner
                 smartSettings.EncoderSelection = EncoderSelectionMode.Automatic;
             }
 
-            selection = EncoderSelectionResolver.Resolve(smartSettings, smartDecision.TargetCodec, capabilities);
-            smartDecision = smartDecision with { SelectedEncoder = selection.SelectedEncoder };
+            if (_resultCache?.TryGet(media, settings, out var cachedResult) == true &&
+                cachedResult.DecisionSnapshot is { } cachedDecision)
+            {
+                targetCodec = cachedDecision.TargetCodec;
+                selection = EncoderSelectionResolver.Resolve(
+                    smartSettings,
+                    targetCodec,
+                    capabilities,
+                    benchmark: benchmark,
+                    media: media,
+                    targetBitDepth: targetBitDepth,
+                    tuningPreset: settings.EncoderTuningPreset,
+                    profile: settings.CompressionProfile,
+                    performanceMode: settings.PerformanceMode);
+                smartDecision = cachedDecision with
+                {
+                    SelectedEncoder = selection.SelectedEncoder,
+                    AutoEncoderDecision = selection.AutoDecision
+                };
+                DiagnosticLog.Write("result-cache", $"Smart 命中缓存：{media.FullPath}");
+            }
+            else
+            {
+                smartDecision = _smartCompressionPlanner.CreateDecision(media, settings, capabilities, benchmark);
+                selection = EncoderSelectionResolver.Resolve(
+                    smartSettings,
+                    smartDecision.TargetCodec,
+                    capabilities,
+                    benchmark: benchmark,
+                    media: media,
+                    targetBitDepth: targetBitDepth,
+                    tuningPreset: settings.EncoderTuningPreset,
+                    profile: settings.CompressionProfile,
+                    performanceMode: settings.PerformanceMode);
+                smartDecision = smartDecision with
+                {
+                    SelectedEncoder = selection.SelectedEncoder,
+                    AutoEncoderDecision = selection.AutoDecision
+                };
+                _resultCache?.Set(media, settings, smartDecision);
+                DiagnosticLog.Write("result-cache", $"Smart 缓存未命中：{media.FullPath}");
+            }
+
             targetCodec = smartDecision.TargetCodec;
         }
         else
         {
-            selection = EncoderSelectionResolver.Resolve(settings, targetCodec, capabilities, preferHardwareForAutomatic: false);
+            selection = EncoderSelectionResolver.Resolve(
+                settings,
+                targetCodec,
+                capabilities,
+                preferHardwareForAutomatic: false,
+                benchmark: benchmark,
+                media: media,
+                targetBitDepth: targetBitDepth,
+                tuningPreset: settings.EncoderTuningPreset,
+                profile: settings.CompressionProfile,
+                performanceMode: settings.PerformanceMode);
         }
 
         warnings.AddRange(selection.Warnings);
         var effectiveEncoder = selection.SelectedEncoder;
+        var bitDepthDecision = BitDepthPolicyResolver.Resolve(
+            media,
+            settings.BitDepthPolicy,
+            effectiveEncoder,
+            capabilities);
+        if (!string.IsNullOrWhiteSpace(bitDepthDecision.Warning))
+        {
+            warnings.Add(bitDepthDecision.Warning);
+        }
+        var encodingPreset = EncoderTuningCatalog.Resolve(
+            effectiveEncoder,
+            settings.EncoderTuningPreset,
+            settings.EncodingPreset);
 
         var videoBitrate = settings.CompressionMode switch
         {
@@ -82,11 +161,9 @@ public sealed class CompressionPlanner
             fpsLimit = null;
         }
 
-        var outputExtension = media.Extension.ToLowerInvariant();
-        if (outputExtension == ".mp4" && media.SubtitleCodecs.Count > 0)
-        {
-            warnings.Add("MP4 容器不支持部分字幕格式。本次会尝试复制字幕；若不兼容，FFmpeg 将安全失败且不会影响源文件。");
-        }
+        var outputExtension = OutputPathService.GetOutputExtension(media, settings).ToLowerInvariant();
+        var streamAudit = _containerCompatibilityPolicy.Audit(media, outputExtension, settings.AudioMode);
+        warnings.AddRange(streamAudit.Warnings);
         if (outputExtension is ".webm" or ".avi")
         {
             warnings.Add($"{outputExtension} 容器与 H.264/H.265 兼容性有限；建议输出为 MP4 或 MKV。若 FFmpeg 拒绝该组合，源文件不会被修改。");
@@ -97,7 +174,7 @@ public sealed class CompressionPlanner
             effectiveEncoder,
             settings.CompressionMode,
             settings.Crf,
-            settings.EncodingPreset,
+            encodingPreset,
             videoBitrate,
             resolutionLimit,
             fpsLimit,
@@ -112,18 +189,57 @@ public sealed class CompressionPlanner
             targetCodec)
         {
             InputInfo = media,
+            StreamAudit = streamAudit,
             CompressionBenefitScore = smartDecision?.CompressionBenefitScore ?? 0,
             SourceBitsPerPixel = smartDecision?.SourceBitsPerPixel,
             SourceBitsPerPixelPerFrame = smartDecision?.SourceBitsPerPixelPerFrame,
-            TargetBitsPerPixelPerFrame = smartDecision?.TargetBitsPerPixelPerFrame
+            TargetBitsPerPixelPerFrame = smartDecision?.TargetBitsPerPixelPerFrame,
+            EncoderTuningPreset = settings.EncoderTuningPreset,
+            BitDepthPolicy = settings.BitDepthPolicy,
+            TargetBitDepth = bitDepthDecision.TargetBitDepth,
+            TargetPixelFormat = bitDepthDecision.TargetPixelFormat,
+            TargetProfile = bitDepthDecision.TargetProfile,
+            BitDepthDecision = bitDepthDecision,
+            AutoEncoderDecision = selection.AutoDecision,
+            BlocksExecution = streamAudit.BlocksExecution || bitDepthDecision.BlocksExecution,
+            Reason = selection.AutoDecision?.Reason ??
+                     smartDecision?.Reason ??
+                     $"使用 {EncoderCatalog.Get(effectiveEncoder).DisplayName}，目标为 {targetCodec.GetDescription()} {bitDepthDecision.TargetBitDepth}-bit。"
         };
     }
 
     public SmartCompressionDecision CreateSmartDecision(
         VideoFileInfo media,
         AppSettings settings,
-        EncoderCapabilitySet? capabilities = null) =>
-        _smartCompressionPlanner.CreateDecision(media, settings, capabilities);
+        EncoderCapabilitySet? capabilities = null,
+        EncoderBenchmarkSnapshot? benchmark = null)
+    {
+        if (_resultCache?.TryGet(media, settings, out var cachedResult) == true &&
+            cachedResult.DecisionSnapshot is { } cachedDecision)
+        {
+            var selected = EncoderSelectionResolver.Resolve(
+                settings,
+                cachedDecision.TargetCodec,
+                capabilities,
+                benchmark: benchmark,
+                media: media,
+                targetBitDepth: BitDepthPolicyResolver.ResolveTargetBitDepth(
+                    BitDepthPolicyResolver.DetectBitDepth(media),
+                    settings.BitDepthPolicy),
+                tuningPreset: settings.EncoderTuningPreset,
+                profile: settings.CompressionProfile,
+                performanceMode: settings.PerformanceMode);
+            return cachedDecision with
+            {
+                SelectedEncoder = selected.SelectedEncoder,
+                AutoEncoderDecision = selected.AutoDecision
+            };
+        }
+
+        var decision = _smartCompressionPlanner.CreateDecision(media, settings, capabilities, benchmark);
+        _resultCache?.Set(media, settings, decision);
+        return decision;
+    }
 
     private static (int Width, int Height)? GetResolutionLimit(AppSettings settings) => settings.ResolutionLimit switch
     {
@@ -146,7 +262,8 @@ public sealed class CompressionPlanner
 
     public static bool RequiresSourceProbe(AppSettings settings) =>
         settings.CompressionMode is CompressionMode.TargetSize or CompressionMode.SmartAutomatic ||
-        settings.FpsLimit != FpsLimitPreset.Keep;
+        settings.FpsLimit != FpsLimitPreset.Keep ||
+        settings.BitDepthPolicy != BitDepthPolicy.EightBit;
 
     private static VideoCodecKind LegacyCodec(VideoEncoder encoder) => encoder switch
     {
@@ -199,19 +316,38 @@ public sealed record CompressionPlan(
     public Guid PlanId { get; init; } = Guid.NewGuid();
 
     public VideoFileInfo? InputInfo { get; init; }
+    public ContainerCompatibilityAudit? StreamAudit { get; init; }
     public VmafCalibrationResult? QualityCalibration { get; init; }
     public double CompressionBenefitScore { get; init; }
     public double? SourceBitsPerPixel { get; init; }
     public double? SourceBitsPerPixelPerFrame { get; init; }
     public double? TargetBitsPerPixelPerFrame { get; init; }
+    public EncoderTuningPreset EncoderTuningPreset { get; init; } = EncoderTuningPreset.Balanced;
+    public BitDepthPolicy BitDepthPolicy { get; init; } = BitDepthPolicy.Auto;
+    public int TargetBitDepth { get; init; } = 8;
+    public string? TargetPixelFormat { get; init; }
+    public string? TargetProfile { get; init; }
+    public BitDepthDecision? BitDepthDecision { get; init; }
+    public AutoEncoderDecision? AutoEncoderDecision { get; init; }
+    public bool BlocksExecution { get; init; }
+
+    public bool IsHdrSource => InputInfo?.IsHdr == true;
 
     public IReadOnlyList<VideoEncoder> EncoderCandidates =>
         [Encoder, .. (FallbackEncoders ?? Array.Empty<VideoEncoder>()).Where(candidate => candidate != Encoder).Take(3)];
 
     public CompressionPlan WithEncoder(VideoEncoder encoder) =>
-        this with
+        WithEncoderCore(encoder);
+
+    private CompressionPlan WithEncoderCore(VideoEncoder encoder)
+    {
+        var bitDepthDecision = InputInfo is { } source
+            ? BitDepthPolicyResolver.Resolve(source, BitDepthPolicy, encoder, null)
+            : BitDepthDecision;
+        return this with
         {
             Encoder = encoder,
+            EncodingPreset = EncoderTuningCatalog.Resolve(encoder, EncoderTuningPreset),
             IsTwoPass = Mode == CompressionMode.TargetSize && SupportsTwoPass(encoder),
             MaxVideoBitrateBps = Mode == CompressionMode.TargetSize && !SupportsTwoPass(encoder) && TargetVideoBitrateBps is > 0
                 ? (long)Math.Round(TargetVideoBitrateBps.Value * 1.05)
@@ -225,8 +361,23 @@ public sealed record CompressionPlan(
                     : BufferSizeBps,
             SmartDecision = SmartDecision is null
                 ? null
-                : SmartDecision with { SelectedEncoder = encoder }
+                : SmartDecision with { SelectedEncoder = encoder },
+            TargetPixelFormat = bitDepthDecision is null
+                ? BitDepthPolicyResolver.TargetPixelFormat(encoder, TargetBitDepth)
+                : bitDepthDecision.TargetPixelFormat,
+            TargetProfile = bitDepthDecision?.TargetProfile ?? BitDepthPolicyResolver.TargetProfile(encoder, TargetBitDepth),
+            BitDepthDecision = bitDepthDecision,
+            BlocksExecution = StreamAudit?.BlocksExecution == true ||
+                              (bitDepthDecision?.BlocksExecution ?? BlocksExecution),
+            AutoEncoderDecision = AutoEncoderDecision is null
+                ? null
+                : AutoEncoderDecision with
+                {
+                    SelectedEncoder = encoder,
+                    FallbackChain = EncoderCandidates.Where(candidate => candidate != encoder).ToArray()
+                }
         };
+    }
 
     private static bool SupportsTwoPass(VideoEncoder encoder) =>
         encoder is VideoEncoder.Libx264 or VideoEncoder.Libx265 or VideoEncoder.LibsvtAv1;
@@ -325,19 +476,42 @@ public sealed record CompressionPlan(
         var arguments = new List<string> { "-y", "-i", inputPath };
         if (firstPass)
         {
-            arguments.AddRange(["-map", "0:v:0", "-an", "-sn", "-dn"]);
+            arguments.AddRange(["-map", GetPrimaryVideoMap(), "-an", "-sn", "-dn"]);
+        }
+        else if (StreamAudit is { Decisions.Count: > 0 } audit)
+        {
+            foreach (var decision in audit.Decisions.Where(decision => decision.Action != StreamRetentionAction.Remove))
+            {
+                arguments.AddRange(["-map", $"0:{decision.Stream.StreamIndex}"]);
+            }
+            arguments.AddRange(["-map_metadata", "0", "-map_chapters", "0"]);
         }
         else
         {
-            arguments.AddRange(["-map", "0:v:0", "-map", "0:a?", "-map", "0:s?", "-map", "0:t?", "-map_metadata", "0", "-map_chapters", "0"]);
+            // Use the probed primary index when available so an attached
+            // picture that happens to be the first video stream is never fed
+            // into a VMAF sample or a legacy no-audit plan as the main video.
+            arguments.AddRange(["-map", GetPrimaryVideoMap(), "-map", "0:a?", "-map", "0:s?", "-map", "0:t?", "-map_metadata", "0", "-map_chapters", "0"]);
         }
 
         arguments.AddRange(BuildVideoArguments());
+        if (!firstPass && StreamAudit is { Decisions.Count: > 0 })
+        {
+            arguments.AddRange(BuildAttachedPictureArguments());
+            arguments.AddRange(BuildStreamMetadataArguments());
+        }
         var filters = BuildVideoFilters();
         if (filters.Count > 0)
         {
-            arguments.Add("-vf");
-            arguments.Add(string.Join(',', filters));
+            if (!firstPass && StreamAudit is { Decisions.Count: > 0 })
+            {
+                arguments.AddRange(BuildAuditedVideoFilterArguments(filters));
+            }
+            else
+            {
+                arguments.Add("-vf");
+                arguments.Add(string.Join(',', filters));
+            }
         }
 
         if (IsTwoPass)
@@ -363,6 +537,11 @@ public sealed record CompressionPlan(
         return arguments;
     }
 
+    private string GetPrimaryVideoMap() =>
+        InputInfo?.PrimaryVideoStreamIndex is { } streamIndex && streamIndex >= 0
+            ? $"0:{streamIndex}"
+            : "0:v:0";
+
     private IEnumerable<string> BuildVideoArguments()
     {
         yield return "-c:v";
@@ -370,6 +549,38 @@ public sealed record CompressionPlan(
         foreach (var argument in EncoderStrategyCatalog.Get(Encoder).BuildVideoArguments(this))
         {
             yield return argument;
+        }
+
+        yield return "-pix_fmt";
+        yield return TargetPixelFormat ?? BitDepthPolicyResolver.TargetPixelFormat(Encoder, TargetBitDepth);
+        if (TargetBitDepth >= 10 && !string.IsNullOrWhiteSpace(TargetProfile))
+        {
+            yield return "-profile:v";
+            yield return TargetProfile!;
+        }
+
+        if (IsHdrSource)
+        {
+            if (!string.IsNullOrWhiteSpace(InputInfo?.ColorPrimaries))
+            {
+                yield return "-color_primaries";
+                yield return InputInfo.ColorPrimaries!;
+            }
+            if (!string.IsNullOrWhiteSpace(InputInfo?.ColorTransfer))
+            {
+                yield return "-color_trc";
+                yield return InputInfo.ColorTransfer!;
+            }
+            if (!string.IsNullOrWhiteSpace(InputInfo?.ColorSpace))
+            {
+                yield return "-colorspace";
+                yield return InputInfo.ColorSpace!;
+            }
+            if (!string.IsNullOrWhiteSpace(InputInfo?.ColorRange))
+            {
+                yield return "-color_range";
+                yield return InputInfo.ColorRange!;
+            }
         }
     }
 
@@ -390,6 +601,54 @@ public sealed record CompressionPlan(
 
     private IEnumerable<string> BuildAudioAndAttachmentArguments()
     {
+        if (StreamAudit is { Decisions.Count: > 0 } audit)
+        {
+            var audioDecisions = audit.Decisions
+                .Where(decision => decision.Stream.StreamType == MediaStreamType.Audio)
+                .ToArray();
+            if (audioDecisions.Length > 0)
+            {
+                var encodeAudio = audioDecisions.Any(decision => decision.Action == StreamRetentionAction.EncodeAudio);
+                yield return "-c:a";
+                yield return encodeAudio ? "aac" : "copy";
+                if (encodeAudio)
+                {
+                    yield return "-b:a";
+                    yield return $"{AudioBitrateKbps}k";
+                }
+            }
+
+            var subtitleDecisions = audit.Decisions
+                .Where(decision => decision.Stream.StreamType == MediaStreamType.Subtitle)
+                .ToArray();
+            if (subtitleDecisions.Length > 0)
+            {
+                yield return "-c:s";
+                yield return "copy";
+                for (var ordinal = 0; ordinal < subtitleDecisions.Length; ordinal++)
+                {
+                    if (subtitleDecisions[ordinal].Action == StreamRetentionAction.ConvertSubtitle)
+                    {
+                        yield return $"-c:s:{ordinal}";
+                        yield return "mov_text";
+                    }
+                }
+            }
+
+            if (audit.Decisions.Any(decision => decision.Stream.StreamType == MediaStreamType.Attachment))
+            {
+                yield return "-c:t";
+                yield return "copy";
+            }
+            if (audit.Decisions.Any(decision => decision.Stream.StreamType == MediaStreamType.Data))
+            {
+                yield return "-c:d";
+                yield return "copy";
+            }
+
+            yield break;
+        }
+
         yield return "-c:a";
         yield return AudioMode == AudioMode.Copy ? "copy" : "aac";
         if (AudioMode == AudioMode.Aac)
@@ -402,6 +661,146 @@ public sealed record CompressionPlan(
         yield return "copy";
         yield return "-c:t";
         yield return "copy";
+    }
+
+    private IEnumerable<string> BuildAttachedPictureArguments()
+    {
+        var videoOrdinal = 0;
+        foreach (var decision in StreamAudit!.Decisions.Where(decision =>
+                     decision.Action != StreamRetentionAction.Remove &&
+                     decision.Stream.StreamType == MediaStreamType.Video))
+        {
+            if (decision.Stream.IsAttachedPicture)
+            {
+                yield return $"-c:v:{videoOrdinal}";
+                yield return "copy";
+            }
+            videoOrdinal++;
+        }
+    }
+
+    private IEnumerable<string> BuildAuditedVideoFilterArguments(IReadOnlyList<string> filters)
+    {
+        var videoOrdinal = 0;
+        var filter = string.Join(',', filters);
+        foreach (var decision in StreamAudit!.Decisions.Where(decision =>
+                     decision.Action != StreamRetentionAction.Remove &&
+                     decision.Stream.StreamType == MediaStreamType.Video))
+        {
+            if (!decision.Stream.IsAttachedPicture)
+            {
+                yield return $"-filter:v:{videoOrdinal}";
+                yield return filter;
+            }
+
+            videoOrdinal++;
+        }
+    }
+
+    private IEnumerable<string> BuildStreamMetadataArguments()
+    {
+        var ordinals = new Dictionary<MediaStreamType, int>();
+        foreach (var decision in StreamAudit!.Decisions.Where(decision => decision.Action != StreamRetentionAction.Remove))
+        {
+            var ordinal = ordinals.TryGetValue(decision.Stream.StreamType, out var current) ? current : 0;
+            ordinals[decision.Stream.StreamType] = ordinal + 1;
+            var specifier = decision.Stream.StreamType switch
+            {
+                MediaStreamType.Video => "v",
+                MediaStreamType.Audio => "a",
+                MediaStreamType.Subtitle => "s",
+                MediaStreamType.Attachment => "t",
+                MediaStreamType.Data => "d",
+                _ => null
+            };
+            if (specifier is null)
+            {
+                continue;
+            }
+
+            var metadata = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            if (decision.Stream.Metadata is not null)
+            {
+                foreach (var item in decision.Stream.Metadata)
+                {
+                    if (!string.IsNullOrWhiteSpace(item.Key) && !string.IsNullOrWhiteSpace(item.Value))
+                    {
+                        metadata[item.Key] = item.Value;
+                    }
+                }
+            }
+
+            if (!string.IsNullOrWhiteSpace(decision.Stream.Language))
+            {
+                metadata.TryAdd("language", decision.Stream.Language);
+            }
+            if (!string.IsNullOrWhiteSpace(decision.Stream.Title))
+            {
+                metadata.TryAdd("title", decision.Stream.Title);
+            }
+            foreach (var item in metadata.OrderBy(item => item.Key, StringComparer.OrdinalIgnoreCase))
+            {
+                yield return $"-metadata:s:{specifier}:{ordinal}";
+                yield return $"{item.Key}={item.Value}";
+            }
+
+            var dispositionFlags = GetDispositionFlags(decision.Stream);
+            if (dispositionFlags is not null)
+            {
+                yield return $"-disposition:{specifier}:{ordinal}";
+                yield return dispositionFlags;
+            }
+        }
+    }
+
+    private static string? GetDispositionFlags(MediaStreamInfo stream)
+    {
+        var names = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["default"] = "default",
+            ["dub"] = "dub",
+            ["original"] = "original",
+            ["comment"] = "comment",
+            ["lyrics"] = "lyrics",
+            ["karaoke"] = "karaoke",
+            ["forced"] = "forced",
+            ["hearing_impaired"] = "hearing_impaired",
+            ["visual_impaired"] = "visual_impaired",
+            ["clean_effects"] = "clean_effects",
+            ["attached_pic"] = "attached_pic",
+            ["timed_thumbnails"] = "timed_thumbnails",
+            ["captions"] = "captions",
+            ["descriptions"] = "descriptions",
+            ["metadata"] = "metadata",
+            ["dependent"] = "dependent",
+            ["still_image"] = "still_image",
+            ["multilayer"] = "multilayer",
+            ["non_diegetic"] = "non_diegetic"
+        };
+
+        var hasDisposition = stream.Disposition is not null;
+        var flags = stream.Disposition is null
+            ? []
+            : stream.Disposition
+                .Where(item => item.Value != 0 && names.ContainsKey(item.Key))
+                .Select(item => names[item.Key])
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+        if (stream.Default && !flags.Contains("default", StringComparer.OrdinalIgnoreCase))
+        {
+            flags.Add("default");
+        }
+        if (stream.Forced && !flags.Contains("forced", StringComparer.OrdinalIgnoreCase))
+        {
+            flags.Add("forced");
+        }
+
+        if (!hasDisposition && flags.Count == 0)
+        {
+            return null;
+        }
+
+        return flags.Count == 0 ? "0" : string.Join('+', flags);
     }
 
     public static string FfmpegEncoderName(VideoEncoder encoder) => encoder switch

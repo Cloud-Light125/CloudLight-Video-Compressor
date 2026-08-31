@@ -25,7 +25,7 @@ public static class CompressionProfileCatalog
     public static IReadOnlyList<CompressionProfileDefinition> Definitions { get; } =
     [
         new(CompressionProfile.HighQuality, "高质量", 96.5, VideoCodecKind.H265,
-            EncoderSelectionMode.CpuSoftware, 1.12, 0.15, false, false,
+            EncoderSelectionMode.Automatic, 1.12, 0.15, false, false,
             AudioPolicy.FollowSettings, BandwidthPolicy.None, SpeedVsEfficiencyPreference.Efficiency),
         new(CompressionProfile.Balanced, "平衡", 95, VideoCodecKind.H265,
             EncoderSelectionMode.Automatic, 1.0, 0.08, false, false,
@@ -97,7 +97,8 @@ public sealed record CompressionAttempt(
     DateTimeOffset StartedAt,
     DateTimeOffset? CompletedAt = null,
     CompressionFailureKind FailureKind = CompressionFailureKind.None,
-    string? Message = null)
+    string? Message = null,
+    double? AverageSpeed = null)
 {
     public EncoderImplementation Implementation => (EncoderImplementation)Encoder;
     public EncoderType Type => EncoderCatalog.Get(Encoder).IsHardware ? EncoderType.Hardware : EncoderType.Software;
@@ -122,17 +123,39 @@ public sealed record CompressionProgress(
     TimeSpan? EstimatedRemaining,
     DateTimeOffset LastProgressAt,
     bool IsEtaStable,
-    bool IsStalled = false)
+    bool IsStalled = false,
+    double? SmoothedSpeed = null,
+    int EtaSampleCount = 0,
+    EtaConfidence EtaConfidence = EtaConfidence.Unknown)
 {
     public string EtaDisplay => IsEtaStable && EstimatedRemaining is { } remaining
-        ? DisplayFormat.Duration(remaining.TotalSeconds)
+        ? DisplayFormat.EstimatedDuration(remaining)
         : Percent <= 0 ? "—" : "计算中";
 }
 
-public sealed record VmafSample(double StartSeconds, double DurationSeconds)
+public sealed record VmafSample(
+    double StartSeconds,
+    double DurationSeconds,
+    VmafComplexityClass Complexity = VmafComplexityClass.Unknown,
+    double? ComplexityScore = null,
+    string? ComplexitySignal = null)
 {
     public double EndSeconds => StartSeconds + DurationSeconds;
+    public string ComplexityDisplay => Complexity switch
+    {
+        VmafComplexityClass.Low => "低复杂度",
+        VmafComplexityClass.Medium => "中复杂度",
+        VmafComplexityClass.High => "高复杂度",
+        _ => "未分类"
+    };
 }
+
+public sealed record VmafComplexitySignal(
+    double StartSeconds,
+    double DurationSeconds,
+    double Score,
+    string? Signal = null,
+    bool IsInformative = true);
 
 public sealed record VmafMeasurement(
     VmafSample Sample,

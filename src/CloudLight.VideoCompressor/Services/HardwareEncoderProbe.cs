@@ -21,7 +21,8 @@ public sealed class HardwareEncoderProbe
     public async Task<HardwareEncoderProbeResult> ProbeAsync(
         FFmpegTools tools,
         VideoEncoder encoder,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        int targetBitDepth = 8)
     {
         var startInfo = new ProcessStartInfo
         {
@@ -31,13 +32,22 @@ public sealed class HardwareEncoderProbe
             UseShellExecute = false,
             CreateNoWindow = true
         };
-        foreach (var argument in new[]
+        var arguments = new List<string>
         {
             "-hide_banner", "-loglevel", "error",
             "-f", "lavfi", "-i", "color=c=black:s=128x72:r=1",
-            "-frames:v", "2", "-an", "-c:v", CompressionPlan.FfmpegEncoderName(encoder),
+            "-frames:v", "2", "-an", "-c:v", CompressionPlan.FfmpegEncoderName(encoder)
+        };
+        if (targetBitDepth >= 10)
+        {
+            arguments.AddRange(["-vf", "format=p010le", "-pix_fmt", "p010le"]);
+            arguments.AddRange(["-profile:v", EncoderCatalog.Get(encoder).Codec == VideoCodecKind.H265 ? "main10" : "high10"]);
+        }
+        arguments.AddRange(
+        [
             "-f", "null", "-"
-        })
+        ]);
+        foreach (var argument in arguments)
         {
             startInfo.ArgumentList.Add(argument);
         }

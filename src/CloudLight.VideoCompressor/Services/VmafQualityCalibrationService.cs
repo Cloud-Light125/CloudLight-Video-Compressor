@@ -71,6 +71,8 @@ public sealed class VmafCapabilityService
 
 public static class VmafSampleSelector
 {
+    public const int SamplingSchemaVersion = 2;
+
     public static IReadOnlyList<VmafSample> Select(
         double durationSeconds,
         int sampleDurationSeconds = 8,
@@ -96,6 +98,216 @@ public static class VmafSampleSelector
             .Where(sample => sample.DurationSeconds > 0.5)
             .ToArray();
     }
+
+    /// <summary>
+    /// Selects representative windows from a bounded complexity signal. The
+    /// selector prefers low/middle/high-complexity content over fixed
+    /// start/middle/end positions and ignores non-informative windows.
+    /// </summary>
+    public static IReadOnlyList<VmafSample> SelectComplexityAware(
+        double durationSeconds,
+        int sampleDurationSeconds,
+        int maximumSamples,
+        IReadOnlyList<VmafComplexitySignal>? signals)
+    {
+        var fallback = Select(durationSeconds, sampleDurationSeconds, maximumSamples);
+        if (signals is null || signals.Count == 0)
+        {
+            return fallback;
+        }
+
+        var length = Math.Min(sampleDurationSeconds, Math.Max(1, durationSeconds));
+        var usable = signals
+            .Where(signal => signal.IsInformative &&
+                             signal.DurationSeconds > 0.5 &&
+                             signal.StartSeconds >= 0 &&
+                             signal.StartSeconds < durationSeconds &&
+                             double.IsFinite(signal.Score))
+            .OrderBy(signal => signal.StartSeconds)
+            .ToArray();
+        if (usable.Length == 0)
+        {
+            return fallback;
+        }
+
+        var interior = usable
+            .Where(signal => signal.StartSeconds >= length * 0.25 &&
+                             signal.StartSeconds + signal.DurationSeconds <= durationSeconds - length * 0.25)
+            .ToArray();
+        var pool = interior.Length >= Math.Min(maximumSamples, 2) ? interior : usable;
+        var ordered = pool.OrderBy(signal => signal.Score).ToArray();
+        var targetPercentiles = maximumSamples switch
+        {
+            1 => new[] { 0.50 },
+            2 => new[] { 0.25, 0.75 },
+            _ => new[] { 0.15, 0.50, 0.85 }
+        };
+        var selected = new List<VmafSample>();
+        foreach (var percentile in targetPercentiles)
+        {
+            var targetIndex = (int)Math.Round((ordered.Length - 1) * percentile);
+            var candidate = ordered
+                .Select((signal, index) => (signal, index))
+                .OrderBy(item => Math.Abs(item.index - targetIndex))
+                .ThenBy(item => item.signal.StartSeconds)
+                .FirstOrDefault(item => selected.All(existing =>
+                    Math.Abs(existing.StartSeconds - item.signal.StartSeconds) >= length * 0.45))
+                .signal;
+            if (candidate is null)
+            {
+                continue;
+            }
+
+            var rank = Array.IndexOf(ordered, candidate);
+            var complexity = rank < (ordered.Length - 1) / 3d
+                ? VmafComplexityClass.Low
+                : rank > (ordered.Length - 1) * 2d / 3d
+                    ? VmafComplexityClass.High
+                    : VmafComplexityClass.Medium;
+            selected.Add(new VmafSample(
+                Math.Round(Math.Clamp(candidate.StartSeconds, 0, Math.Max(0, durationSeconds - length)), 3),
+                Math.Min(length, durationSeconds - candidate.StartSeconds),
+                complexity,
+                candidate.Score,
+                candidate.Signal));
+        }
+
+        return selected.Count == 0
+            ? fallback
+            : selected
+                .Where(sample => sample.DurationSeconds > 0.5)
+                .OrderBy(sample => sample.StartSeconds)
+                .ToArray();
+    }
+}
+
+/// <summary>
+/// Best-effort, bounded FFmpeg analysis used only to improve VMAF sample
+/// placement. Failure intentionally falls back to VmafSampleSelector.Select.
+/// </summary>
+public sealed class VmafComplexityAnalyzer
+{
+    private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(30);
+    private const int MaximumOutputCharacters = 256_000;
+
+    public async Task<IReadOnlyList<VmafComplexitySignal>> AnalyzeAsync(
+        VideoFileInfo source,
+        FFmpegTools tools,
+        CancellationToken cancellationToken)
+    {
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = tools.FFmpegPath,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true
+        };
+        startInfo.ArgumentList.Add("-hide_banner");
+        startInfo.ArgumentList.Add("-v");
+        startInfo.ArgumentList.Add("error");
+        startInfo.ArgumentList.Add("-i");
+        startInfo.ArgumentList.Add(source.FullPath);
+        startInfo.ArgumentList.Add("-vf");
+        startInfo.ArgumentList.Add("fps=1,scale=320:-2:force_original_aspect_ratio=decrease,signalstats,metadata=print:file=-");
+        startInfo.ArgumentList.Add("-an");
+        startInfo.ArgumentList.Add("-f");
+        startInfo.ArgumentList.Add("null");
+        startInfo.ArgumentList.Add("NUL");
+
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(Timeout);
+        using var process = new Process { StartInfo = startInfo };
+        try
+        {
+            process.Start();
+            using var tracked = MediaProcessRegistry.Register(process);
+            using var registration = timeout.Token.Register(() => MediaProcessRegistry.TryTerminate(process));
+            var stdout = ReadBoundedAsync(process.StandardOutput, timeout.Token);
+            var stderr = ReadBoundedAsync(process.StandardError, timeout.Token);
+            await process.WaitForExitAsync(timeout.Token).ConfigureAwait(false);
+            await Task.WhenAll(stdout, stderr).ConfigureAwait(false);
+            if (process.ExitCode != 0)
+            {
+                return [];
+            }
+
+            var standardOutput = await stdout.ConfigureAwait(false);
+            var standardError = await stderr.ConfigureAwait(false);
+            return ParseSignals(standardOutput + Environment.NewLine + standardError);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception exception) when (exception is InvalidOperationException or IOException or
+                                            System.ComponentModel.Win32Exception or TimeoutException)
+        {
+            MediaProcessRegistry.TryTerminate(process);
+            DiagnosticLog.Write("vmaf", $"复杂度分析失败，使用固定抽样：{exception.Message}");
+            return [];
+        }
+    }
+
+    private static async Task<string> ReadBoundedAsync(StreamReader reader, CancellationToken cancellationToken)
+    {
+        var builder = new StringBuilder();
+        while (true)
+        {
+            var line = await reader.ReadLineAsync().WaitAsync(cancellationToken).ConfigureAwait(false);
+            if (line is null)
+            {
+                return builder.ToString();
+            }
+
+            if (builder.Length < MaximumOutputCharacters)
+            {
+                var remaining = MaximumOutputCharacters - builder.Length;
+                builder.Append(line.AsSpan(0, Math.Min(line.Length, remaining)));
+                if (builder.Length < MaximumOutputCharacters)
+                {
+                    builder.AppendLine();
+                }
+            }
+        }
+    }
+
+    private static IReadOnlyList<VmafComplexitySignal> ParseSignals(string text)
+    {
+        var signals = new List<VmafComplexitySignal>();
+        var currentTime = 0d;
+        var currentYMax = 255d;
+        foreach (var line in text.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries))
+        {
+            var time = Regex.Match(line, @"pts_time[:=](?<value>-?[0-9]+(?:\.[0-9]+)?)", RegexOptions.IgnoreCase);
+            if (time.Success &&
+                double.TryParse(time.Groups["value"].Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var parsedTime))
+            {
+                currentTime = Math.Max(0, parsedTime);
+            }
+
+            var yMax = Regex.Match(line, @"(?:YMAX|lavfi\.signalstats\.YMAX)=(?<value>[0-9]+(?:\.[0-9]+)?)", RegexOptions.IgnoreCase);
+            if (yMax.Success &&
+                double.TryParse(yMax.Groups["value"].Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var parsedYMax))
+            {
+                currentYMax = parsedYMax;
+            }
+
+            var yDif = Regex.Match(line, @"(?:YDIF|lavfi\.signalstats\.YDIF)=(?<value>[0-9]+(?:\.[0-9]+)?)", RegexOptions.IgnoreCase);
+            if (yDif.Success &&
+                double.TryParse(yDif.Groups["value"].Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var score))
+            {
+                signals.Add(new VmafComplexitySignal(
+                    currentTime,
+                    1,
+                    score,
+                    "signalstats.YDIF",
+                    currentYMax > 16));
+            }
+        }
+
+        return signals;
+    }
 }
 
 public sealed class VmafCalibrationCache
@@ -114,18 +326,41 @@ public sealed class VmafCalibrationCache
 /// </summary>
 public sealed class VmafQualityCalibrationService
 {
+    public const int CurrentSamplingSchemaVersion = VmafSampleSelector.SamplingSchemaVersion;
+    private static readonly SemaphoreSlim CalibrationGate = new(1, 1);
     private readonly VmafCapabilityService _capabilityService;
     private readonly VmafCalibrationCache _cache;
+    private readonly VmafComplexityAnalyzer _complexityAnalyzer;
 
     public VmafQualityCalibrationService(
         VmafCapabilityService? capabilityService = null,
-        VmafCalibrationCache? cache = null)
+        VmafCalibrationCache? cache = null,
+        VmafComplexityAnalyzer? complexityAnalyzer = null)
     {
         _capabilityService = capabilityService ?? new VmafCapabilityService();
         _cache = cache ?? new VmafCalibrationCache();
+        _complexityAnalyzer = complexityAnalyzer ?? new VmafComplexityAnalyzer();
     }
 
     public async Task<VmafCalibrationResult> CalibrateAsync(
+        VideoFileInfo source,
+        AppSettings settings,
+        VideoEncoder encoder,
+        FFmpegTools tools,
+        CancellationToken cancellationToken)
+    {
+        await CalibrationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            return await CalibrateCoreAsync(source, settings, encoder, tools, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            CalibrationGate.Release();
+        }
+    }
+
+    private async Task<VmafCalibrationResult> CalibrateCoreAsync(
         VideoFileInfo source,
         AppSettings settings,
         VideoEncoder encoder,
@@ -148,10 +383,28 @@ public sealed class VmafQualityCalibrationService
             return cached;
         }
 
-        var samples = VmafSampleSelector.Select(
+        var bitDepthDecision = BitDepthPolicyResolver.Resolve(source, settings.BitDepthPolicy, encoder);
+
+        IReadOnlyList<VmafComplexitySignal> complexitySignals;
+        try
+        {
+            complexitySignals = await _complexityAnalyzer.AnalyzeAsync(source, tools, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception exception)
+        {
+            DiagnosticLog.Write("vmaf", $"复杂度分析异常，使用固定抽样：{exception.Message}");
+            complexitySignals = [];
+        }
+
+        var samples = VmafSampleSelector.SelectComplexityAware(
             source.DurationSeconds.Value,
             settings.QualityCalibrationSampleSeconds,
-            Math.Min(3, settings.QualityCalibrationCandidateCount));
+            Math.Min(3, settings.QualityCalibrationCandidateCount),
+            complexitySignals);
         if (samples.Count == 0)
         {
             return VmafCalibrationResult.Unavailable("没有可用的代表性片段。 ");
@@ -171,7 +424,16 @@ public sealed class VmafQualityCalibrationService
                     cancellationToken.ThrowIfCancellationRequested();
                     var candidatePath = Path.Combine(temporaryDirectory, $"candidate-{quality:0}-{sample.StartSeconds:0.###}.mp4");
                     var logPath = Path.Combine(temporaryDirectory, $"vmaf-{quality:0}-{sample.StartSeconds:0.###}.json");
-                    var encoded = await EncodeSampleAsync(source, encoder, quality, sample, candidatePath, tools, cancellationToken).ConfigureAwait(false);
+                    var encoded = await EncodeSampleAsync(
+                        source,
+                        encoder,
+                        quality,
+                        sample,
+                        bitDepthDecision,
+                        candidatePath,
+                        settings.EncoderTuningPreset,
+                        tools,
+                        cancellationToken).ConfigureAwait(false);
                     if (!encoded)
                     {
                         continue;
@@ -263,7 +525,9 @@ public sealed class VmafQualityCalibrationService
         VideoEncoder encoder,
         double quality,
         VmafSample sample,
+        BitDepthDecision bitDepthDecision,
         string outputPath,
+        EncoderTuningPreset tuningPreset,
         FFmpegTools tools,
         CancellationToken cancellationToken)
     {
@@ -272,14 +536,23 @@ public sealed class VmafQualityCalibrationService
             encoder,
             CompressionMode.Crf,
             quality,
-            "fast",
+            EncoderTuningCatalog.Resolve(encoder, tuningPreset),
             null,
             null,
             null,
             AudioMode.Copy,
             192,
             ".mp4",
-            []);
+            [])
+        {
+            InputInfo = source,
+            EncoderTuningPreset = tuningPreset,
+            BitDepthPolicy = bitDepthDecision.Policy,
+            TargetBitDepth = bitDepthDecision.TargetBitDepth,
+            TargetPixelFormat = bitDepthDecision.TargetPixelFormat,
+            TargetProfile = bitDepthDecision.TargetProfile,
+            BitDepthDecision = bitDepthDecision
+        };
         var arguments = plan.BuildArguments(source.FullPath, outputPath, false).ToList();
         arguments.InsertRange(3, ["-ss", sample.StartSeconds.ToString("0.###", CultureInfo.InvariantCulture), "-t", sample.DurationSeconds.ToString("0.###", CultureInfo.InvariantCulture)]);
         var run = await RunProcessAsync(tools.FFmpegPath, arguments, cancellationToken).ConfigureAwait(false);
@@ -365,7 +638,8 @@ public sealed class VmafQualityCalibrationService
     {
         var lastWrite = File.Exists(source.FullPath) ? File.GetLastWriteTimeUtc(source.FullPath).Ticks : 0;
         return string.Join('|', source.FullPath, source.FileSizeBytes, lastWrite, encoder, settings.CompressionProfile,
-            settings.VmafTarget, settings.QualityCalibrationSampleSeconds, settings.QualityCalibrationCandidateCount);
+            settings.VmafTarget, settings.QualityCalibrationSampleSeconds, settings.QualityCalibrationCandidateCount,
+            CurrentSamplingSchemaVersion, settings.EncoderTuningPreset, settings.BitDepthPolicy);
     }
 
     private static double ProfileVmafTarget(AppSettings settings) => settings.CompressionProfile switch

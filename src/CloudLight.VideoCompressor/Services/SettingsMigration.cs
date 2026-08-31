@@ -27,6 +27,9 @@ public static class SettingsMigration
         settings.Rules ??= [];
         settings.ProbeConcurrency = settings.ProbeConcurrency;
         settings.CompressionConcurrency = settings.CompressionConcurrency;
+        settings.PerformanceMode = settings.PerformanceMode;
+        settings.EncoderTuningPreset = settings.EncoderTuningPreset;
+        settings.BitDepthPolicy = settings.BitDepthPolicy;
         settings.Crf = settings.Crf;
         settings.TargetVideoBitrateMbps = settings.TargetVideoBitrateMbps;
         settings.AudioBitrateKbps = settings.AudioBitrateKbps;

@@ -265,6 +265,8 @@ public sealed class SmartCompressionAndCapabilityTests
         Assert.Null(loaded.TargetVideoCodec);
         Assert.Equal(VideoCodecKind.H265, loaded.SelectedVideoCodec);
         Assert.Equal(SmartCompressionPreset.Balanced, loaded.SmartPreset);
+        Assert.Equal(PerformanceMode.Automatic, loaded.PerformanceMode);
+        Assert.True(loaded.PreventSleepDuringCompression);
     }
 
     [Fact]
@@ -281,7 +283,9 @@ public sealed class SmartCompressionAndCapabilityTests
             RemotePlaybackSafetyRatio = 0.72,
             SmartMaximumVideoBitrateMbps = 10,
             SmartMinimumExpectedSavingRatio = 0.11,
-            SmartQualityFactor = 1.08
+            SmartQualityFactor = 1.08,
+            PerformanceMode = PerformanceMode.LowEndStable,
+            PreventSleepDuringCompression = false
         };
 
         var service = new SettingsService(Path.Combine(directory.Path, "settings.json"));
@@ -296,6 +300,8 @@ public sealed class SmartCompressionAndCapabilityTests
         Assert.Equal(10, loaded.SmartMaximumVideoBitrateMbps);
         Assert.Equal(0.11, loaded.SmartMinimumExpectedSavingRatio);
         Assert.Equal(1.08, loaded.SmartQualityFactor);
+        Assert.Equal(PerformanceMode.LowEndStable, loaded.PerformanceMode);
+        Assert.False(loaded.PreventSleepDuringCompression);
     }
 
     private static EncoderCapabilitySet Capabilities(params VideoEncoder[] usableHardware) =>

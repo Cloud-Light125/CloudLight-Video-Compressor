@@ -22,6 +22,7 @@ public partial class MainWindow : Window
         Closing += OnClosing;
         Closed += OnClosed;
         _viewModel.CompressionTaskReady += OnCompressionTaskReady;
+        _viewModel.RecoveredTaskAvailable += OnRecoveredTaskAvailable;
     }
 
     private async void OnLoaded(object sender, RoutedEventArgs e)
@@ -78,13 +79,16 @@ public partial class MainWindow : Window
     }
 
     private void OnCompressionTaskReady(object? sender, CompressionTaskReadyEventArgs e)
+        => OpenCompressionTask(e, startImmediately: false);
+
+    private void OpenCompressionTask(CompressionTaskReadyEventArgs e, bool startImmediately)
     {
         if (_compressionTaskWindow is not null)
         {
             return;
         }
 
-        _compressionTaskWindow = new CompressionTaskWindow(e.Session, e.WorkflowService, e.Tools)
+        _compressionTaskWindow = new CompressionTaskWindow(e.Session, e.WorkflowService, e.Tools, e.Capabilities, startImmediately)
         {
             Owner = this
         };
@@ -100,9 +104,32 @@ public partial class MainWindow : Window
         }
     }
 
+    private void OnRecoveredTaskAvailable(object? sender, CompressionTaskReadyEventArgs e)
+    {
+        if (_compressionTaskWindow is not null)
+        {
+            return;
+        }
+
+        var choice = System.Windows.MessageBox.Show(
+            this,
+            "检测到上次未完成的压缩任务。\n\n选择“是”继续任务，选择“否”查看任务，选择“取消”放弃记录。\n只有选择“是”后才会继续启动 FFmpeg。",
+            Title,
+            System.Windows.MessageBoxButton.YesNoCancel,
+            System.Windows.MessageBoxImage.Information);
+        if (choice == System.Windows.MessageBoxResult.Cancel)
+        {
+            _viewModel.DiscardRecoveredSession();
+            return;
+        }
+
+        OpenCompressionTask(e, choice == System.Windows.MessageBoxResult.Yes);
+    }
+
     private void OnClosed(object? sender, EventArgs e)
     {
         _viewModel.CompressionTaskReady -= OnCompressionTaskReady;
+        _viewModel.RecoveredTaskAvailable -= OnRecoveredTaskAvailable;
         _viewModel.Dispose();
     }
 }

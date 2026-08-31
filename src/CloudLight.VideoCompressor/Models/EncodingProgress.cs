@@ -13,10 +13,13 @@ public sealed record EncodingProgress(
     TimeSpan? Elapsed = null,
     DateTimeOffset? LastProgressAt = null,
     bool IsEtaStable = false,
-    bool IsStalled = false)
+    bool IsStalled = false,
+    double? SmoothedSpeed = null,
+    int EtaSampleCount = 0,
+    EtaConfidence EtaConfidence = EtaConfidence.Unknown)
 {
     public string EtaDisplay => IsEtaStable && Remaining is { } remaining
-        ? DisplayFormat.Duration(remaining.TotalSeconds)
+        ? DisplayFormat.EstimatedDuration(remaining)
         : Percent <= 0 ? "—" : "计算中";
 
     public CompressionProgress ToCompressionProgress(PipelineStage stage = PipelineStage.Execute) => new(
@@ -32,7 +35,10 @@ public sealed record EncodingProgress(
         Remaining,
         LastProgressAt ?? DateTimeOffset.UtcNow,
         IsEtaStable,
-        IsStalled);
+        IsStalled,
+        SmoothedSpeed,
+        EtaSampleCount,
+        EtaConfidence);
 }
 
 public sealed record WorkflowProgress(
@@ -43,6 +49,13 @@ public sealed record WorkflowProgress(
     SmartCompressionDecision? SmartDecision = null,
     VideoEncoder? Encoder = null,
     CompressionProgress? ProgressSnapshot = null,
-    CompressionFailureKind FailureKind = CompressionFailureKind.None);
+    CompressionFailureKind FailureKind = CompressionFailureKind.None,
+    bool ResetEta = false);
 
-public sealed record ScanProgress(int Completed, int Total, string? CurrentPath, bool IsComplete = false);
+public sealed record ScanProgress(
+    int Completed,
+    int Total,
+    string? CurrentPath,
+    bool IsComplete = false,
+    int CacheHits = 0,
+    int ActualProbes = 0);

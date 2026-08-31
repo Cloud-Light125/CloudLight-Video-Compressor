@@ -13,6 +13,8 @@ public sealed class AppSettings : ObservableObject
     private bool _recursiveScan = true;
     private int _probeConcurrency = 2;
     private int _compressionConcurrency = 1;
+    private PerformanceMode _performanceMode = PerformanceMode.Automatic;
+    private bool _preventSleepDuringCompression = true;
     private CompressionMode _compressionMode = CompressionMode.Crf;
     private VideoEncoder _videoEncoder = VideoEncoder.Libx265;
     // These nullable fields preserve the legacy VideoEncoder-only settings format.
@@ -20,6 +22,8 @@ public sealed class AppSettings : ObservableObject
     private EncoderSelectionMode? _encoderSelection;
     private VideoCodecKind? _targetVideoCodec;
     private string _encodingPreset = "medium";
+    private EncoderTuningPreset _encoderTuningPreset = EncoderTuningPreset.Balanced;
+    private BitDepthPolicy _bitDepthPolicy = BitDepthPolicy.Auto;
     private double _crf = 26;
     private double _targetVideoBitrateMbps = 6;
     private double _targetSizeValue = 700;
@@ -32,6 +36,7 @@ public sealed class AppSettings : ObservableObject
     private AudioMode _audioMode = AudioMode.Copy;
     private int _audioBitrateKbps = 192;
     private OutputLocationMode _outputLocation = OutputLocationMode.SameDirectory;
+    private OutputContainerMode _outputContainer = OutputContainerMode.PreserveSource;
     private string _outputDirectory = string.Empty;
     private string _outputSubdirectory = "Compressed";
     private bool _preserveDirectoryStructure = true;
@@ -54,12 +59,18 @@ public sealed class AppSettings : ObservableObject
     private double _vmafTarget = 95;
     private int _qualityCalibrationSampleSeconds = 8;
     private int _qualityCalibrationCandidateCount = 3;
+    private HealthCheckLevel _healthCheckLevel = HealthCheckLevel.Quick;
+    private CompletionAction _completionAction;
+    private bool _completionActionConfirmed;
+    private bool _doNotPowerOffOnFailure = true;
 
     public string LastDirectory { get => _lastDirectory; set => SetProperty(ref _lastDirectory, value); }
     public string FFmpegDirectory { get => _ffmpegDirectory; set => SetProperty(ref _ffmpegDirectory, value); }
     public bool RecursiveScan { get => _recursiveScan; set => SetProperty(ref _recursiveScan, value); }
     public int ProbeConcurrency { get => _probeConcurrency; set => SetProperty(ref _probeConcurrency, Math.Clamp(value, 1, 8)); }
     public int CompressionConcurrency { get => _compressionConcurrency; set => SetProperty(ref _compressionConcurrency, Math.Clamp(value, 1, 4)); }
+    public PerformanceMode PerformanceMode { get => _performanceMode; set => SetProperty(ref _performanceMode, Enum.IsDefined(value) ? value : PerformanceMode.Automatic); }
+    public bool PreventSleepDuringCompression { get => _preventSleepDuringCompression; set => SetProperty(ref _preventSleepDuringCompression, value); }
     public CompressionMode CompressionMode { get => _compressionMode; set => SetProperty(ref _compressionMode, value); }
     public VideoEncoder VideoEncoder
     {
@@ -110,6 +121,29 @@ public sealed class AppSettings : ObservableObject
         set => TargetVideoCodec = value;
     }
     public string EncodingPreset { get => _encodingPreset; set => SetProperty(ref _encodingPreset, string.IsNullOrWhiteSpace(value) ? "medium" : value.Trim()); }
+
+    /// <summary>
+    /// Product-level encoder effort. EncodingPreset is retained as a legacy
+    /// serialized field so 1.2.0 settings and integrations remain readable.
+    /// </summary>
+    public EncoderTuningPreset EncoderTuningPreset
+    {
+        get => _encoderTuningPreset;
+        set => SetProperty(ref _encoderTuningPreset, Enum.IsDefined(value) ? value : EncoderTuningPreset.Balanced);
+    }
+
+    [JsonIgnore]
+    public EncoderTuningPreset TuningPreset
+    {
+        get => EncoderTuningPreset;
+        set => EncoderTuningPreset = value;
+    }
+
+    public BitDepthPolicy BitDepthPolicy
+    {
+        get => _bitDepthPolicy;
+        set => SetProperty(ref _bitDepthPolicy, Enum.IsDefined(value) ? value : BitDepthPolicy.Auto);
+    }
     public double Crf { get => _crf; set => SetProperty(ref _crf, Math.Clamp(value, 0, 51)); }
     public double TargetVideoBitrateMbps { get => _targetVideoBitrateMbps; set => SetProperty(ref _targetVideoBitrateMbps, Math.Max(0.01, value)); }
     // Keep the legacy JSON field so existing settings files continue to deserialize. The UI edits the value and unit separately.
@@ -152,6 +186,7 @@ public sealed class AppSettings : ObservableObject
     public AudioMode AudioMode { get => _audioMode; set => SetProperty(ref _audioMode, value); }
     public int AudioBitrateKbps { get => _audioBitrateKbps; set => SetProperty(ref _audioBitrateKbps, Math.Max(8, value)); }
     public OutputLocationMode OutputLocation { get => _outputLocation; set => SetProperty(ref _outputLocation, value); }
+    public OutputContainerMode OutputContainer { get => _outputContainer; set => SetProperty(ref _outputContainer, Enum.IsDefined(value) ? value : OutputContainerMode.PreserveSource); }
     public string OutputDirectory { get => _outputDirectory; set => SetProperty(ref _outputDirectory, value); }
     public string OutputSubdirectory { get => _outputSubdirectory; set => SetProperty(ref _outputSubdirectory, value); }
     public bool PreserveDirectoryStructure { get => _preserveDirectoryStructure; set => SetProperty(ref _preserveDirectoryStructure, value); }
@@ -258,6 +293,38 @@ public sealed class AppSettings : ObservableObject
     {
         get => _qualityCalibrationCandidateCount;
         set => SetProperty(ref _qualityCalibrationCandidateCount, Math.Clamp(value, 3, 5));
+    }
+
+    public HealthCheckLevel HealthCheckLevel
+    {
+        get => _healthCheckLevel;
+        set => SetProperty(ref _healthCheckLevel, Enum.IsDefined(value) ? value : HealthCheckLevel.Quick);
+    }
+
+    public CompletionAction CompletionAction
+    {
+        get => _completionAction;
+        set
+        {
+            var normalized = Enum.IsDefined(value) ? value : CompletionAction.None;
+            if (SetProperty(ref _completionAction, normalized))
+            {
+                CompletionActionConfirmed = false;
+            }
+        }
+    }
+
+    public bool CompletionActionConfirmed
+    {
+        get => _completionActionConfirmed;
+        set => SetProperty(ref _completionActionConfirmed, value);
+    }
+
+    /// <summary>When true, a failed/cancelled queue never powers off the machine.</summary>
+    public bool DoNotPowerOffOnFailure
+    {
+        get => _doNotPowerOffOnFailure;
+        set => SetProperty(ref _doNotPowerOffOnFailure, value);
     }
 
     public ObservableCollection<CompressionRule> Rules { get; set; } = [];

@@ -191,6 +191,11 @@
                         <TextBlock Text="{Binding DecisionReasonDisplay}"
                                    FontWeight="SemiBold"
                                    TextWrapping="Wrap" />
+                        <TextBlock Text="{Binding AutoEncoderDecisionDisplay}"
+                                   Foreground="{StaticResource MutedTextBrush}"
+                                   TextWrapping="Wrap"
+                                   Margin="0,6,0,0"
+                                   Visibility="{Binding HasAutoEncoderDecision, Converter={StaticResource BoolToVisibility}}" />
                     </StackPanel>
                 </GroupBox>
 
@@ -205,6 +210,17 @@
                         <TextBlock Text="{Binding OutputPath}" Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" />
                         <TextBlock Text="{Binding ResultSizeDisplay}" FontSize="15" FontWeight="SemiBold" Margin="0,6,0,0" />
                         <TextBlock Text="{Binding PlannedSavingDisplay}" Foreground="{StaticResource MutedTextBrush}" Margin="0,3,0,0" />
+                        <TextBlock Text="{Binding PlanWarningsDisplay}"
+                                   Foreground="#9A3412"
+                                   TextWrapping="Wrap"
+                                   Margin="0,6,0,0"
+                                   Visibility="{Binding HasPlanWarnings, Converter={StaticResource BoolToVisibility}}" />
+                        <TextBlock Text="{Binding StreamRetentionDisplay}" Foreground="{StaticResource MutedTextBrush}" Margin="0,6,0,0" />
+                        <TextBlock Text="{Binding StreamAuditWarningsDisplay}"
+                                   Foreground="#9A3412"
+                                   TextWrapping="Wrap"
+                                   Margin="0,4,0,0"
+                                   Visibility="{Binding HasStreamAuditWarnings, Converter={StaticResource BoolToVisibility}}" />
                     </StackPanel>
                 </GroupBox>
 
@@ -213,6 +229,10 @@
                         <StackPanel>
                         <Grid>
                             <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="Auto" />
                                 <RowDefinition Height="Auto" />
                                 <RowDefinition Height="Auto" />
                                 <RowDefinition Height="Auto" />
@@ -233,18 +253,26 @@
                             <TextBlock Grid.Row="1" Grid.Column="1" Text="{Binding PlanIdDisplay}" Margin="0,5,0,0" />
                             <TextBlock Grid.Row="2" Grid.Column="0" Text="编码格式" Foreground="{StaticResource MutedTextBrush}" Margin="0,5,0,0" />
                             <TextBlock Grid.Row="2" Grid.Column="1" Text="{Binding PlannedCodecDisplay}" Margin="0,5,0,0" />
-                            <TextBlock Grid.Row="3" Grid.Column="0" Text="码率控制" Foreground="{StaticResource MutedTextBrush}" Margin="0,5,0,0" />
-                            <TextBlock Grid.Row="3" Grid.Column="1" Text="{Binding RateControlDisplay}" Margin="0,5,0,0" />
-                            <TextBlock Grid.Row="4" Grid.Column="0" Text="目标 / 最大码率" Foreground="{StaticResource MutedTextBrush}" Margin="0,5,0,0" />
-                            <TextBlock Grid.Row="4" Grid.Column="1" Text="{Binding TargetAndMaxVideoBitrateDisplay}" Margin="0,5,0,0" />
-                            <TextBlock Grid.Row="5" Grid.Column="0" Text="BPPF（源 → 目标）" Foreground="{StaticResource MutedTextBrush}" Margin="0,5,0,0" />
-                            <TextBlock Grid.Row="5" Grid.Column="1" Text="{Binding SourceTargetBppfDisplay}" Margin="0,5,0,0" />
-                            <TextBlock Grid.Row="6" Grid.Column="0" Text="压缩收益评分" Foreground="{StaticResource MutedTextBrush}" Margin="0,5,0,0" />
-                            <TextBlock Grid.Row="6" Grid.Column="1" Text="{Binding BenefitScoreDisplay}" Margin="0,5,0,0" />
-                            <TextBlock Grid.Row="7" Grid.Column="0" Text="回退尝试" Foreground="{StaticResource MutedTextBrush}" Margin="0,5,0,0" />
-                            <TextBlock Grid.Row="7" Grid.Column="1" Text="{Binding AttemptsDisplay}" Margin="0,5,0,0" TextWrapping="Wrap" />
-                            <TextBlock Grid.Row="8" Grid.Column="0" Text="质量校准" Foreground="{StaticResource MutedTextBrush}" Margin="0,5,0,0" />
-                            <TextBlock Grid.Row="8" Grid.Column="1" Text="{Binding QualityCalibrationDisplay}" Margin="0,5,0,0" TextWrapping="Wrap" />
+                            <TextBlock Grid.Row="3" Grid.Column="0" Text="编码倾向" Foreground="{StaticResource MutedTextBrush}" Margin="0,5,0,0" />
+                            <TextBlock Grid.Row="3" Grid.Column="1" Text="{Binding PlannedTuningDisplay}" Margin="0,5,0,0" />
+                            <TextBlock Grid.Row="4" Grid.Column="0" Text="目标位深 / 像素格式" Foreground="{StaticResource MutedTextBrush}" Margin="0,5,0,0" />
+                            <TextBlock Grid.Row="4" Grid.Column="1" Text="{Binding PlannedBitDepthDisplay}" Margin="0,5,0,0" />
+                            <TextBlock Grid.Row="5" Grid.Column="0" Text="目标 profile" Foreground="{StaticResource MutedTextBrush}" Margin="0,5,0,0" />
+                            <TextBlock Grid.Row="5" Grid.Column="1" Text="{Binding PlannedProfileDisplay}" Margin="0,5,0,0" />
+                            <TextBlock Grid.Row="6" Grid.Column="0" Text="色彩 / HDR 保护" Foreground="{StaticResource MutedTextBrush}" Margin="0,5,0,0" />
+                            <TextBlock Grid.Row="6" Grid.Column="1" Text="{Binding HdrProtectionDisplay}" Margin="0,5,0,0" TextWrapping="Wrap" />
+                            <TextBlock Grid.Row="7" Grid.Column="0" Text="码率控制" Foreground="{StaticResource MutedTextBrush}" Margin="0,5,0,0" />
+                            <TextBlock Grid.Row="7" Grid.Column="1" Text="{Binding RateControlDisplay}" Margin="0,5,0,0" />
+                            <TextBlock Grid.Row="8" Grid.Column="0" Text="目标 / 最大码率" Foreground="{StaticResource MutedTextBrush}" Margin="0,5,0,0" />
+                            <TextBlock Grid.Row="8" Grid.Column="1" Text="{Binding TargetAndMaxVideoBitrateDisplay}" Margin="0,5,0,0" />
+                            <TextBlock Grid.Row="9" Grid.Column="0" Text="BPPF（源 → 目标）" Foreground="{StaticResource MutedTextBrush}" Margin="0,5,0,0" />
+                            <TextBlock Grid.Row="9" Grid.Column="1" Text="{Binding SourceTargetBppfDisplay}" Margin="0,5,0,0" />
+                            <TextBlock Grid.Row="10" Grid.Column="0" Text="压缩收益评分" Foreground="{StaticResource MutedTextBrush}" Margin="0,5,0,0" />
+                            <TextBlock Grid.Row="10" Grid.Column="1" Text="{Binding BenefitScoreDisplay}" Margin="0,5,0,0" />
+                            <TextBlock Grid.Row="11" Grid.Column="0" Text="回退尝试" Foreground="{StaticResource MutedTextBrush}" Margin="0,5,0,0" />
+                            <TextBlock Grid.Row="11" Grid.Column="1" Text="{Binding AttemptsDisplay}" Margin="0,5,0,0" TextWrapping="Wrap" />
+                            <TextBlock Grid.Row="12" Grid.Column="0" Text="质量校准" Foreground="{StaticResource MutedTextBrush}" Margin="0,5,0,0" />
+                            <TextBlock Grid.Row="12" Grid.Column="1" Text="{Binding QualityCalibrationDisplay}" Margin="0,5,0,0" TextWrapping="Wrap" />
                         </Grid>
                         <Expander Header="查看 FFmpeg 参数" Margin="0,10,0,0">
                             <TextBox Text="{Binding CommandPreviewDisplay}"
@@ -425,6 +453,8 @@
                     <RowDefinition Height="Auto" />
                     <RowDefinition Height="Auto" />
                     <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
                 </Grid.RowDefinitions>
                 <DockPanel Grid.Row="0">
                     <TextBlock DockPanel.Dock="Left" Text="任务进度" Foreground="#1E3A8A" FontWeight="SemiBold" />
@@ -453,6 +483,16 @@
                     <TextBlock Grid.Column="4" Text="{Binding FailedCount, StringFormat=失败 {0}}" Foreground="#334A7D" />
                     <TextBlock Grid.Column="5" Text="{Binding CurrentTaskDisplay, StringFormat=当前任务：{0}}" Foreground="#334A7D" TextTrimming="CharacterEllipsis" />
                 </Grid>
+                <StackPanel Grid.Row="3" Orientation="Horizontal" Margin="0,8,0,0">
+                    <TextBlock Text="{Binding CurrentTaskEtaDisplay, StringFormat=当前视频预计剩余：{0}}" Foreground="#334A7D" />
+                    <TextBlock Text="{Binding QueueEtaDisplay, StringFormat=全部任务预计剩余：{0}}" Foreground="#334A7D" Margin="18,0,0,0" />
+                    <TextBlock Text="{Binding ElapsedDisplay, StringFormat=已用时间：{0}}" Foreground="#334A7D" Margin="18,0,0,0" />
+                    <TextBlock Text="{Binding EstimatedCompletionDisplay}" Foreground="#334A7D" Margin="18,0,0,0" />
+                </StackPanel>
+                <StackPanel Grid.Row="4" Orientation="Horizontal" Margin="0,8,0,0">
+                    <TextBlock Text="{Binding QueuePauseStatusDisplay}" Foreground="#795B16" TextWrapping="Wrap" />
+                    <TextBlock Text="{Binding CompletionActionCountdownDisplay}" Foreground="#795B16" Margin="18,0,0,0" TextWrapping="Wrap" />
+                </StackPanel>
             </Grid>
         </Border>
 
@@ -555,7 +595,7 @@
                                             <TextBlock Text="{Binding ResultSizeDisplay}" FontWeight="SemiBold" />
                                         </DockPanel>
                                         <TextBlock Grid.Row="4"
-                                                   Text="{Binding ProgressEtaDisplay, StringFormat=预计剩余 {0}}"
+                                                   Text="{Binding TimeEstimateDisplay}"
                                                    Foreground="{StaticResource MutedTextBrush}"
                                                    Margin="0,4,0,0" />
                                         <TextBlock Grid.Row="5"
@@ -614,11 +654,21 @@
                             IsEnabled="{Binding CanReturn}"
                             Style="{StaticResource BaseButtonStyle}"
                             MinWidth="82" />
+                    <Button Content="{Binding QueuePauseButtonDisplay}"
+                            Command="{Binding ToggleQueuePauseCommand}"
+                            Style="{StaticResource BaseButtonStyle}"
+                            Visibility="{Binding CanToggleQueuePause, Converter={StaticResource BoolToVisibility}}"
+                            MinWidth="92" />
                     <Button Content="停止"
                             Command="{Binding StopCommand}"
                             Style="{StaticResource DangerButtonStyle}"
                             Visibility="{Binding IsRunning, Converter={StaticResource BoolToVisibility}}"
                             MinWidth="82" />
+                    <Button Content="取消完成操作"
+                            Command="{Binding CancelCompletionActionCommand}"
+                            Visibility="{Binding CompletionCountdownActive, Converter={StaticResource BoolToVisibility}}"
+                            Style="{StaticResource DangerButtonStyle}"
+                            MinWidth="112" />
                     <Button Content="开始压缩"
                             Command="{Binding StartCompressionCommand}"
                             IsEnabled="{Binding CanStart}"

@@ -1,3 +1,4 @@
+using CloudLight.VideoCompressor.Infrastructure;
 using CloudLight.VideoCompressor.Models;
 
 namespace CloudLight.VideoCompressor.Services;
@@ -5,7 +6,8 @@ namespace CloudLight.VideoCompressor.Services;
 public sealed record EncoderSelectionResult(
     VideoEncoder SelectedEncoder,
     IReadOnlyList<VideoEncoder> FallbackEncoders,
-    IReadOnlyList<string> Warnings);
+    IReadOnlyList<string> Warnings,
+    AutoEncoderDecision? AutoDecision = null);
 
 /// <summary>
 /// Maps the user-facing codec/vendor choices to concrete FFmpeg encoders. All
@@ -18,9 +20,16 @@ public static class EncoderSelectionResolver
         AppSettings settings,
         VideoCodecKind codec,
         EncoderCapabilitySet? capabilities,
-        bool preferHardwareForAutomatic = true)
+        bool preferHardwareForAutomatic = true,
+        EncoderBenchmarkSnapshot? benchmark = null,
+        VideoFileInfo? media = null,
+        int? targetBitDepth = null,
+        EncoderTuningPreset? tuningPreset = null,
+        CompressionProfile? profile = null,
+        PerformanceMode performanceMode = PerformanceMode.Automatic)
     {
         var mode = settings.EncoderSelection;
+        var requestedBitDepth = Math.Max(8, targetBitDepth ?? 8);
         if (mode is null)
         {
             var legacyEncoder = settings.VideoEncoder;
@@ -33,19 +42,57 @@ public static class EncoderSelectionResolver
                     [$"旧设置中的编码器 {EncoderCatalog.Get(legacyEncoder).DisplayName} 与目标编码格式不一致，已使用 {EncoderCatalog.Get(softwareForCodec).DisplayName}。"]);
             }
 
-            if (capabilities?.Get(legacyEncoder) is { IsUsable: false } unavailable)
+            var legacyCapability = capabilities?.Get(legacyEncoder);
+            if (legacyCapability is { IsUsable: false } ||
+                capabilities?.IsUsable(legacyEncoder, requestedBitDepth) == false)
             {
                 var software = SoftwareEncoder(codec);
                 return new EncoderSelectionResult(
                     software,
                     [],
-                    [$"{unavailable.DisplayName} 当前不可用：{unavailable.UnavailableReason} 已回退到 {EncoderCatalog.Get(software).DisplayName}。"]);
+                    [$"{EncoderCatalog.Get(legacyEncoder).DisplayName} 当前不可用：" +
+                     $"{legacyCapability?.UnavailableReason ?? $"{requestedBitDepth}-bit 输出能力未通过检测"}，" +
+                     $"已回退到 {EncoderCatalog.Get(software).DisplayName}。"]);
             }
 
+            var legacyUsable = capabilities?.IsUsable(legacyEncoder, requestedBitDepth) ?? !IsHardware(legacyEncoder);
             return new EncoderSelectionResult(
                 settings.VideoEncoder,
-                IsHardware(legacyEncoder) ? [SoftwareEncoder(codec)] : [],
-                []);
+                IsHardware(legacyEncoder) && legacyUsable ? [SoftwareEncoder(codec)] : [],
+                [],
+                null);
+        }
+
+        if (mode is EncoderSelectionMode.Automatic or EncoderSelectionMode.HardwareAutomatic)
+        {
+            var auto = new AutoEncoderSelectionService().Select(new AutoEncoderSelectionRequest(
+                codec,
+                profile ?? settings.CompressionProfile,
+                tuningPreset ?? settings.EncoderTuningPreset,
+                capabilities,
+                benchmark,
+                media?.Width,
+                media?.Height,
+                media?.FrameRate,
+                media?.VideoCodec,
+                requestedBitDepth,
+                null,
+                mode == EncoderSelectionMode.HardwareAutomatic,
+                performanceMode));
+            var autoWarnings = new List<string>();
+            if (mode == EncoderSelectionMode.HardwareAutomatic &&
+                !EncoderCatalog.Get(auto.SelectedEncoder).IsHardware)
+            {
+                autoWarnings.Add($"当前没有可用的 {codec.GetDescription()} {requestedBitDepth}-bit 硬件编码器，已回退到 {EncoderCatalog.Get(auto.SelectedEncoder).DisplayName}。");
+            }
+            var autoFallbacks = auto.FallbackChain.ToList();
+            if (mode == EncoderSelectionMode.HardwareAutomatic &&
+                auto.SelectedEncoder != SoftwareEncoder(codec) &&
+                !autoFallbacks.Contains(SoftwareEncoder(codec)))
+            {
+                autoFallbacks.Add(SoftwareEncoder(codec));
+            }
+            return new EncoderSelectionResult(auto.SelectedEncoder, autoFallbacks, autoWarnings, auto);
         }
 
         var candidates = mode.Value switch
@@ -60,7 +107,8 @@ public static class EncoderSelectionResolver
         };
 
         var usable = candidates
-            .Where(encoder => capabilities?.IsUsable(encoder) ?? !IsHardware(encoder))
+            .Where(encoder => capabilities?.IsUsable(encoder, requestedBitDepth) ??
+                              (!IsHardware(encoder) && EncoderStrategyCatalog.Get(encoder).SupportsBitDepth(requestedBitDepth)))
             .Distinct()
             .ToList();
         if (usable.Count == 0)

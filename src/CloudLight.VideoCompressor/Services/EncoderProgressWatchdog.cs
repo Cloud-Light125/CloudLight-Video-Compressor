@@ -102,10 +102,16 @@ public sealed class EncoderProgressWatchdog
     }
 }
 
-public sealed record EtaEstimate(TimeSpan? Remaining, bool IsStable)
+public sealed record EtaEstimate(
+    TimeSpan? Remaining,
+    bool IsStable,
+    double? SmoothedSpeed = null,
+    int SampleCount = 0,
+    int ValidSpeedSampleCount = 0,
+    EtaConfidence Confidence = EtaConfidence.Unknown)
 {
     public string Display => IsStable && Remaining is { } remaining
-        ? DisplayFormat.Duration(remaining.TotalSeconds)
+        ? DisplayFormat.EstimatedDuration(remaining)
         : "计算中";
 }
 
@@ -115,45 +121,161 @@ public sealed record EtaEstimate(TimeSpan? Remaining, bool IsStable)
 /// </summary>
 public sealed class EtaCalculator
 {
-    private readonly Queue<(DateTimeOffset At, double Seconds)> _samples = new();
+    private const int MaximumSamples = 512;
+    private const double SpeedSmoothingFactor = 0.25;
+    private const double RemainingSmoothingFactor = 0.25;
+    private readonly Queue<ProgressSample> _samples = new();
     private readonly int _minimumSamples;
     private readonly TimeSpan _window;
+    private readonly TimeSpan _minimumRuntime;
+    private readonly bool _requireValidSpeedSamples;
+    private double? _smoothedSpeed;
+    private TimeSpan? _smoothedRemaining;
+    private double _lastProcessedSeconds;
 
-    public EtaCalculator(int minimumSamples = 3, TimeSpan? window = null)
+    public EtaCalculator(int minimumSamples = 3, TimeSpan? window = null, TimeSpan? minimumRuntime = null)
     {
         _minimumSamples = Math.Max(2, minimumSamples);
         _window = window ?? TimeSpan.FromSeconds(8);
+        _minimumRuntime = minimumRuntime.GetValueOrDefault();
     }
 
-    public EtaEstimate Update(double processedSeconds, double? totalSeconds, DateTimeOffset? at = null)
+    public EtaCalculator(EtaCalculatorOptions options)
+        : this(options.MinimumSamples, options.SampleWindow, options.MinimumRuntime)
+    {
+        _requireValidSpeedSamples = options.RequireValidSpeedSamples;
+    }
+
+    public double? SmoothedSpeed => _smoothedSpeed;
+    public int SampleCount => _samples.Count;
+    public int ValidSpeedSampleCount => _samples.Count(sample => sample.Speed is not null);
+    public double LastProcessedSeconds => _lastProcessedSeconds;
+
+    public EtaEstimate Update(
+        double processedSeconds,
+        double? totalSeconds,
+        DateTimeOffset? at = null,
+        double? reportedSpeed = null)
     {
         var now = at ?? DateTimeOffset.UtcNow;
-        if (processedSeconds >= 0)
+        if (processedSeconds >= 0 && double.IsFinite(processedSeconds))
         {
-            _samples.Enqueue((now, processedSeconds));
+            _lastProcessedSeconds = Math.Max(_lastProcessedSeconds, processedSeconds);
+            var previous = _samples.Count == 0 ? null : _samples.Last();
+            var derivedSpeed = previous is { } prior &&
+                               now > prior.At &&
+                               processedSeconds > prior.Seconds + 0.1
+                ? (processedSeconds - prior.Seconds) / (now - prior.At).TotalSeconds
+                : (double?)null;
+            var speed = IsUsableSpeed(reportedSpeed) ? reportedSpeed : derivedSpeed;
+            _samples.Enqueue(new ProgressSample(now, processedSeconds, speed));
         }
-        while (_samples.Count > 0 && now - _samples.Peek().At > _window)
+        while (_samples.Count > 0 && _window > TimeSpan.Zero && now - _samples.Peek().At > _window)
+        {
+            _samples.Dequeue();
+        }
+        while (_samples.Count > MaximumSamples)
         {
             _samples.Dequeue();
         }
 
-        if (totalSeconds is not > 0 || _samples.Count < _minimumSamples)
+        var validSpeedSamples = ValidSpeedSampleCount;
+        if (_samples.Count > 0)
         {
-            return new EtaEstimate(null, false);
+            var newestSpeed = _samples.Last().Speed;
+            if (IsUsableSpeed(newestSpeed))
+            {
+                _smoothedSpeed = _smoothedSpeed is { } previousSpeed
+                    ? previousSpeed * (1 - SpeedSmoothingFactor) + newestSpeed!.Value * SpeedSmoothingFactor
+                    : newestSpeed;
+            }
+        }
+
+        var enoughSamples = _requireValidSpeedSamples
+            ? validSpeedSamples >= _minimumSamples
+            : _samples.Count >= _minimumSamples;
+        if (totalSeconds is not > 0 || !enoughSamples)
+        {
+            return UnstableEstimate(validSpeedSamples);
         }
 
         var first = _samples.Peek();
         var last = _samples.Last();
         var elapsed = (last.At - first.At).TotalSeconds;
-        var processed = last.Seconds - first.Seconds;
-        if (elapsed < 0.5 || processed <= 0.1)
+        if (elapsed < 0.5 || elapsed < _minimumRuntime.TotalSeconds || _smoothedSpeed is not > 0)
         {
-            return new EtaEstimate(null, false);
+            return UnstableEstimate(validSpeedSamples);
         }
 
-        var speed = processed / elapsed;
+        var remainingSeconds = Math.Max(0, totalSeconds.Value - last.Seconds);
+        if (remainingSeconds <= 0.05)
+        {
+            _smoothedRemaining = TimeSpan.Zero;
+            return new EtaEstimate(
+                TimeSpan.Zero,
+                true,
+                _smoothedSpeed,
+                _samples.Count,
+                validSpeedSamples,
+                GetConfidence(elapsed, validSpeedSamples));
+        }
+
+        var rawRemaining = TimeSpan.FromSeconds(remainingSeconds / _smoothedSpeed.Value);
+        var remaining = SmoothRemaining(rawRemaining);
         return new EtaEstimate(
-            TimeSpan.FromSeconds(Math.Max(0, (totalSeconds.Value - last.Seconds) / speed)),
-            true);
+            remaining,
+            true,
+            _smoothedSpeed,
+            _samples.Count,
+            validSpeedSamples,
+            GetConfidence(elapsed, validSpeedSamples));
     }
+
+    public void Reset()
+    {
+        _samples.Clear();
+        _smoothedSpeed = null;
+        _smoothedRemaining = null;
+        _lastProcessedSeconds = 0;
+    }
+
+    private EtaEstimate UnstableEstimate(int validSpeedSamples) =>
+        new(null, false, _smoothedSpeed, _samples.Count, validSpeedSamples, EtaConfidence.Unknown);
+
+    private TimeSpan SmoothRemaining(TimeSpan rawRemaining)
+    {
+        if (_smoothedRemaining is not { } previous)
+        {
+            _smoothedRemaining = rawRemaining;
+            return rawRemaining;
+        }
+
+        // Bound a single update before applying the EMA. The limits prevent a
+        // noisy FFmpeg speed line from changing hours into minutes, while a
+        // new fallback attempt gets a fresh calculator and can reset fully.
+        var maximumDownwardChange = TimeSpan.FromSeconds(Math.Max(2, previous.TotalSeconds * 0.35));
+        var maximumUpwardChange = TimeSpan.FromSeconds(Math.Max(2, previous.TotalSeconds * 0.50));
+        var bounded = TimeSpan.FromSeconds(Math.Clamp(
+            rawRemaining.TotalSeconds,
+            Math.Max(0, previous.TotalSeconds - maximumDownwardChange.TotalSeconds),
+            previous.TotalSeconds + maximumUpwardChange.TotalSeconds));
+        _smoothedRemaining = TimeSpan.FromSeconds(
+            previous.TotalSeconds * (1 - RemainingSmoothingFactor) +
+            bounded.TotalSeconds * RemainingSmoothingFactor);
+        return _smoothedRemaining.Value;
+    }
+
+    private static bool IsUsableSpeed(double? speed) =>
+        speed is > 0 && double.IsFinite(speed.Value) && speed.Value <= 1_000;
+
+    private static EtaConfidence GetConfidence(double elapsedSeconds, int validSpeedSamples) =>
+        validSpeedSamples >= 12 && elapsedSeconds >= 30
+            ? EtaConfidence.High
+            : validSpeedSamples >= 8 && elapsedSeconds >= 20
+                ? EtaConfidence.Medium
+                : validSpeedSamples >= 5
+                    ? EtaConfidence.Low
+                    : EtaConfidence.Unknown;
+
+    private sealed record ProgressSample(DateTimeOffset At, double Seconds, double? Speed);
 }

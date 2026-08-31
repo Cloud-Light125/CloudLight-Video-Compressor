@@ -14,13 +14,30 @@ namespace CloudLight.VideoCompressor.ViewModels;
 
 public sealed class MainViewModel : ObservableObject, IDisposable
 {
+    private static readonly FFprobeService DefaultProbeService = new();
+    private static readonly FFmpegService DefaultFfmpegService = new();
+    private static readonly MediaProbeCache DefaultProbeCache = new();
+    private static readonly CompressionResultCache DefaultResultCache = new();
+    private static readonly EncoderBenchmarkCache DefaultBenchmarkCache = new();
+    private static readonly EncoderBenchmarkService DefaultBenchmarkService = new(
+        DefaultFfmpegService,
+        DefaultBenchmarkCache);
+    private static readonly MediaHealthCheckService DefaultHealthCheckService = new(
+        DefaultProbeCache,
+        DefaultProbeService,
+        DefaultFfmpegService);
+
     private readonly SettingsService _settingsService;
     private readonly FFmpegLocator _ffmpegLocator;
     private readonly EncoderCapabilityDetector _encoderCapabilityDetector;
     private readonly VideoScannerService _videoScannerService;
+    private readonly FFprobeService _directProbeService = new();
     private readonly CompressionWorkflowService _workflowService;
     private readonly CompressionTaskPlanner _compressionTaskPlanner;
     private readonly CompressionHistoryService _historyService;
+    private readonly CompressionTaskSessionStore _sessionStore;
+    private readonly EncoderBenchmarkService _benchmarkService;
+    private readonly EncoderBenchmarkCache _benchmarkCache;
     private readonly RuleEngine _ruleEngine = new();
     private readonly OutputPathService _outputPathService = new();
     private readonly Dispatcher _dispatcher;
@@ -39,6 +56,10 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     private bool _initialized;
     private bool _isShuttingDown;
     private bool _disposed;
+    private bool _isBenchmarking;
+    private int _benchmarkCompleted;
+    private int _benchmarkTotal;
+    private string _benchmarkStatus = "尚未进行本机性能测试。";
     private string _directoryPath = string.Empty;
     private string _ffmpegStatus = "正在检查 FFmpeg…";
     private string _ffmpegToolTip = string.Empty;
@@ -50,18 +71,23 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     private QueueFilter _selectedQueueFilter = QueueFilter.All;
     private int _scanCompleted;
     private int _scanTotal;
+    private int _scanCacheHits;
+    private int _scanActualProbes;
     private string _currentFile = string.Empty;
     private VideoTaskItem? _currentTaskItem;
+    private readonly ObservableCollection<EncoderBenchmarkDisplayRow> _benchmarkRows = [];
 
     public MainViewModel()
         : this(
             new SettingsService(),
             new FFmpegLocator(),
-            new VideoScannerService(new FFprobeService()),
+            CreateVideoScannerService(),
             CreateWorkflowService(),
             System.Windows.Application.Current?.Dispatcher ?? Dispatcher.CurrentDispatcher,
             new EncoderCapabilityDetector(),
-            CreateCompressionTaskPlanner())
+            CreateCompressionTaskPlanner(),
+            benchmarkService: DefaultBenchmarkService,
+            benchmarkCache: DefaultBenchmarkCache)
     {
     }
 
@@ -73,7 +99,10 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         Dispatcher dispatcher,
         EncoderCapabilityDetector? encoderCapabilityDetector = null,
         CompressionTaskPlanner? compressionTaskPlanner = null,
-        CompressionHistoryService? historyService = null)
+        CompressionHistoryService? historyService = null,
+        CompressionTaskSessionStore? sessionStore = null,
+        EncoderBenchmarkService? benchmarkService = null,
+        EncoderBenchmarkCache? benchmarkCache = null)
     {
         _settingsService = settingsService;
         _ffmpegLocator = ffmpegLocator;
@@ -82,6 +111,9 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         _workflowService = workflowService;
         _compressionTaskPlanner = compressionTaskPlanner ?? CreateCompressionTaskPlanner();
         _historyService = historyService ?? new CompressionHistoryService();
+        _sessionStore = sessionStore ?? new CompressionTaskSessionStore();
+        _benchmarkService = benchmarkService ?? DefaultBenchmarkService;
+        _benchmarkCache = benchmarkCache ?? _benchmarkService.Cache;
         _dispatcher = dispatcher;
         _videoViewRefreshTimer = new DispatcherTimer(DispatcherPriority.DataBind, _dispatcher)
         {
@@ -101,7 +133,9 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         ScanCommand = new AsyncRelayCommand(ScanAsync, CanRunDirectoryOperation);
         DirectProcessCommand = new AsyncRelayCommand(DirectProcessAsync, CanRunDirectoryOperation);
         StartCompressionCommand = new AsyncRelayCommand(StartCompressionAsync, CanStartCompression);
+        RunBenchmarkCommand = new AsyncRelayCommand(RunBenchmarkAsync, CanRunBenchmark);
         StopCommand = new RelayCommand(CancelCurrentOperation, () => IsBusy && !IsShuttingDown);
+        CancelBenchmarkCommand = new RelayCommand(CancelCurrentOperation, () => IsBenchmarking && !IsShuttingDown);
         SelectAllCommand = new RelayCommand(() => SetSelection(true), CanEditSettings);
         DeselectAllCommand = new RelayCommand(() => SetSelection(false), CanEditSettings);
         AddRuleCommand = new RelayCommand(AddRule, CanEditSettings);
@@ -109,9 +143,11 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     }
 
     public event EventHandler<CompressionTaskReadyEventArgs>? CompressionTaskReady;
+    public event EventHandler<CompressionTaskReadyEventArgs>? RecoveredTaskAvailable;
 
     public ObservableCollection<VideoTaskItem> Videos { get; } = [];
     public ObservableCollection<CompressionHistoryEntry> History { get; } = [];
+    public string RecoveryStatusDisplay { get; private set; } = string.Empty;
     public AppSettings Settings
     {
         get => _settings;
@@ -170,8 +206,11 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         (string.IsNullOrWhiteSpace(_currentFile) ? "—" : _currentFile);
     public int ScanCompleted => _scanCompleted;
     public int ScanTotal => _scanTotal;
+    public int ScanCacheHits => _scanCacheHits;
+    public int ScanActualProbes => _scanActualProbes;
     public double ScanProgressPercent => ScanTotal <= 0 ? 0 : Math.Clamp(ScanCompleted / (double)ScanTotal * 100, 0, 100);
     public string ScanProgressDisplay => ScanTotal <= 0 ? "—" : $"{ScanCompleted} / {ScanTotal}";
+    public string ScanProbeSummaryDisplay => $"缓存命中 {_scanCacheHits} · 实际 ffprobe {_scanActualProbes}";
     public double CurrentFileProgressPercent
     {
         get
@@ -209,6 +248,34 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         get => _encoderCapabilitySummary;
         private set => SetProperty(ref _encoderCapabilitySummary, value);
     }
+    public bool IsBenchmarking
+    {
+        get => _isBenchmarking;
+        private set
+        {
+            if (SetProperty(ref _isBenchmarking, value))
+            {
+                OnPropertyChanged(nameof(BenchmarkProgressPercent));
+                OnPropertyChanged(nameof(BenchmarkProgressDisplay));
+                RunBenchmarkCommand.RaiseCanExecuteChanged();
+                CancelBenchmarkCommand.RaiseCanExecuteChanged();
+            }
+        }
+    }
+    public int BenchmarkCompleted => _benchmarkCompleted;
+    public int BenchmarkTotal => _benchmarkTotal;
+    public double BenchmarkProgressPercent => BenchmarkTotal <= 0
+        ? 0
+        : Math.Clamp(BenchmarkCompleted / (double)BenchmarkTotal * 100, 0, 100);
+    public string BenchmarkProgressDisplay => BenchmarkTotal <= 0
+        ? "—"
+        : $"{BenchmarkCompleted} / {BenchmarkTotal}";
+    public string BenchmarkStatusDisplay
+    {
+        get => _benchmarkStatus;
+        private set => SetProperty(ref _benchmarkStatus, value);
+    }
+    public ObservableCollection<EncoderBenchmarkDisplayRow> BenchmarkRows => _benchmarkRows;
     public CompressionRule? SelectedRule
     {
         get => _selectedRule;
@@ -225,7 +292,9 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     public IReadOnlyList<RuleComparison> RuleComparisons { get; } = Enum.GetValues<RuleComparison>();
     public IReadOnlyList<RuleJoin> RuleJoins { get; } = Enum.GetValues<RuleJoin>();
     public IReadOnlyList<CompressionMode> CompressionModes { get; } = Enum.GetValues<CompressionMode>();
-    public IReadOnlyList<string> EncodingPresets { get; } = ["ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "slow", "slower", "veryslow"];
+    public IReadOnlyList<PerformanceMode> PerformanceModes { get; } = Enum.GetValues<PerformanceMode>();
+    public IReadOnlyList<EncoderTuningPreset> EncoderTuningPresets { get; } = EncoderTuningCatalog.Presets;
+    public IReadOnlyList<BitDepthPolicy> BitDepthPolicies { get; } = Enum.GetValues<BitDepthPolicy>();
     public IReadOnlyList<TargetSizeUnit> TargetSizeUnits { get; } = Enum.GetValues<TargetSizeUnit>();
     public ObservableCollection<VideoEncoder> VideoEncoders { get; } = [VideoEncoder.Libx264, VideoEncoder.Libx265];
     public IReadOnlyList<VideoCodecKind> OutputVideoCodecs { get; } = Enum.GetValues<VideoCodecKind>();
@@ -234,6 +303,9 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     public IReadOnlyList<QueueFilter> QueueFilters { get; } = Enum.GetValues<QueueFilter>();
     public IReadOnlyList<AudioMode> AudioModes { get; } = Enum.GetValues<AudioMode>();
     public IReadOnlyList<OutputLocationMode> OutputLocations { get; } = Enum.GetValues<OutputLocationMode>();
+    public IReadOnlyList<OutputContainerMode> OutputContainers { get; } = Enum.GetValues<OutputContainerMode>();
+    public IReadOnlyList<HealthCheckLevel> HealthCheckLevels { get; } = Enum.GetValues<HealthCheckLevel>();
+    public IReadOnlyList<CompletionAction> CompletionActions { get; } = Enum.GetValues<CompletionAction>();
     public IReadOnlyList<OriginalFileAction> OriginalFileActions { get; } = Enum.GetValues<OriginalFileAction>();
     public IReadOnlyList<ResolutionLimitPreset> ResolutionPresets { get; } = Enum.GetValues<ResolutionLimitPreset>();
     public IReadOnlyList<FpsLimitPreset> FpsPresets { get; } = Enum.GetValues<FpsLimitPreset>();
@@ -245,7 +317,9 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     public AsyncRelayCommand ScanCommand { get; }
     public AsyncRelayCommand DirectProcessCommand { get; }
     public AsyncRelayCommand StartCompressionCommand { get; }
+    public AsyncRelayCommand RunBenchmarkCommand { get; }
     public RelayCommand StopCommand { get; }
+    public RelayCommand CancelBenchmarkCommand { get; }
     public RelayCommand SelectAllCommand { get; }
     public RelayCommand DeselectAllCommand { get; }
     public RelayCommand AddRuleCommand { get; }
@@ -270,11 +344,62 @@ public sealed class MainViewModel : ObservableObject, IDisposable
             DirectoryPath = Settings.LastDirectory;
             await RefreshFfmpegAsync(_lifetimeCancellation.Token);
             await RefreshHistoryAsync(_lifetimeCancellation.Token);
+            await LoadRecoverySessionAsync(_lifetimeCancellation.Token);
         }
         catch (OperationCanceledException) when (_lifetimeCancellation.IsCancellationRequested)
         {
             // Closing while startup is checking local settings or FFmpeg is expected.
         }
+    }
+
+    public void DiscardRecoveredSession()
+    {
+        _sessionStore.Delete();
+        RecoveryStatusDisplay = string.Empty;
+        OnPropertyChanged(nameof(RecoveryStatusDisplay));
+        StatusMessage = "已放弃上次未完成的任务记录。";
+    }
+
+    private async Task LoadRecoverySessionAsync(CancellationToken cancellationToken)
+    {
+        if (_capabilityDetectionTask is not null)
+        {
+            try
+            {
+                await _capabilityDetectionTask.WaitAsync(cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                return;
+            }
+            catch (Exception exception)
+            {
+                DiagnosticLog.Write("session", $"恢复任务时硬件能力检测失败，将按软件能力继续：{exception.Message}");
+            }
+        }
+
+        var loaded = await _sessionStore.LoadAsync(cancellationToken).ConfigureAwait(false);
+        await _dispatcher.InvokeAsync(() =>
+        {
+            if (!string.IsNullOrWhiteSpace(loaded.Warning))
+            {
+                RecoveryStatusDisplay = loaded.Warning;
+                OnPropertyChanged(nameof(RecoveryStatusDisplay));
+                StatusMessage = loaded.Warning;
+            }
+
+            if (loaded.Session is null || _tools is null)
+            {
+                return;
+            }
+
+            RecoveryStatusDisplay = $"检测到上次未完成的压缩任务：已完成 {loaded.Session.Entries.Count(entry => entry.ExecutionState == CompressionExecutionState.Completed)} / {loaded.Session.Entries.Count}，中断 {loaded.Session.Entries.Count(entry => entry.ExecutionState == CompressionExecutionState.Interrupted)}。";
+            OnPropertyChanged(nameof(RecoveryStatusDisplay));
+            DiagnosticLog.Write("session", $"SessionRecovered：{loaded.Session.SessionId}");
+            RecoveredTaskAvailable?.Invoke(
+                this,
+                new CompressionTaskReadyEventArgs(loaded.Session, _workflowService, _tools, _encoderCapabilities));
+        }, DispatcherPriority.Background, cancellationToken);
     }
 
     public async Task PersistSettingsAsync(CancellationToken cancellationToken = default)
@@ -426,9 +551,12 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         }
 
         var cancellationToken = _operationCancellation!.Token;
+        var scanPolicy = LongRunningTaskPolicyResolver.Resolve(Settings, _encoderCapabilities);
         Videos.Clear();
         _scanCompleted = 0;
         _scanTotal = 0;
+        _scanCacheHits = 0;
+        _scanActualProbes = 0;
         _currentFile = string.Empty;
         _currentTaskItem = null;
         RefreshQueueProperties();
@@ -439,7 +567,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
             await _videoScannerService.ScanAsync(
                 DirectoryPath,
                 Settings.RecursiveScan,
-                Settings.ProbeConcurrency,
+                scanPolicy.ProbeConcurrency,
                 _tools!,
                 async info =>
                 {
@@ -452,6 +580,18 @@ public sealed class MainViewModel : ObservableObject, IDisposable
 
                         var item = new VideoTaskItem(info);
                         ApplyConditionResult(item, resetTaskStatus: true);
+                        if (info.HealthStatus == MediaHealthStatus.Corrupt)
+                        {
+                            item.IsSelected = false;
+                            item.Status = VideoTaskStatus.Failed;
+                            item.StatusDetail = $"健康检查失败：{info.HealthCheckMessage ?? "不建议直接压缩。"}";
+                            item.ApplyConditionResult(new ConditionEvaluationResult(
+                                ConditionResultState.Failed,
+                                false,
+                                "源文件健康检查失败，已阻止自动压缩。",
+                                [item.StatusDetail],
+                                item.StatusDetail));
+                        }
                         Videos.Add(item);
                     }, DispatcherPriority.Background, cancellationToken);
                 },
@@ -464,7 +604,14 @@ public sealed class MainViewModel : ObservableObject, IDisposable
                             return;
                         }
 
-                        var item = new VideoTaskItem(VideoFileInfo.FromFile(path))
+                        var failedSourceBase = VideoFileInfo.FromFile(path);
+                        var failedSource = failedSourceBase.WithHealthCheck(new MediaHealthCheckResult(
+                            MediaHealthStatus.Corrupt,
+                            Settings.HealthCheckLevel == HealthCheckLevel.Disabled ? HealthCheckLevel.Quick : Settings.HealthCheckLevel,
+                            $"健康检查无法读取媒体：{message}",
+                            DateTimeOffset.UtcNow,
+                            MediaFileFingerprint.FromVideoInfo(failedSourceBase)));
+                        var item = new VideoTaskItem(failedSource)
                         {
                             Status = VideoTaskStatus.Failed,
                             StatusDetail = $"ffprobe 分析失败：{message}",
@@ -491,17 +638,21 @@ public sealed class MainViewModel : ObservableObject, IDisposable
 
                         _scanCompleted = scanProgress.Completed;
                         _scanTotal = scanProgress.Total;
+                        _scanCacheHits = scanProgress.CacheHits;
+                        _scanActualProbes = scanProgress.ActualProbes;
                         _currentTaskItem = null;
                         _currentFile = string.IsNullOrWhiteSpace(scanProgress.CurrentPath)
                             ? _currentFile
                             : Path.GetFileName(scanProgress.CurrentPath);
                         StatusMessage = scanProgress.IsComplete
-                            ? $"扫描完成：{scanProgress.Total} 个视频。"
+                            ? $"扫描完成：{scanProgress.Total} 个视频。缓存命中 {_scanCacheHits}，实际 ffprobe {_scanActualProbes}。"
                             : $"正在分析：{scanProgress.Completed} / {scanProgress.Total}" +
+                              $"（缓存命中 {_scanCacheHits}，实际 ffprobe {_scanActualProbes}）" +
                               (string.IsNullOrWhiteSpace(scanProgress.CurrentPath) ? string.Empty : $" 当前：{Path.GetFileName(scanProgress.CurrentPath)}");
                         RefreshQueueProperties();
                     }, DispatcherPriority.Background, cancellationToken);
-                });
+                },
+                Settings.HealthCheckLevel);
             StatusMessage = $"扫描完成：{TotalVideos} 个视频，符合 {ConditionMatches}，不符合 {ConditionDoesNotMatch}，失败 {FailedVideos}。";
         }
         catch (OperationCanceledException)
@@ -516,6 +667,98 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         {
             RefreshQueueProperties();
             EndOperation();
+        }
+    }
+
+    private async Task RunBenchmarkAsync()
+    {
+        if (IsShuttingDown || IsBenchmarking)
+        {
+            return;
+        }
+        if (!await EnsureToolsAsync())
+        {
+            return;
+        }
+        if (!BeginOperation())
+        {
+            return;
+        }
+
+        IsBenchmarking = true;
+        _benchmarkCompleted = 0;
+        _benchmarkTotal = 0;
+        OnPropertyChanged(nameof(BenchmarkCompleted));
+        OnPropertyChanged(nameof(BenchmarkTotal));
+        OnPropertyChanged(nameof(BenchmarkProgressPercent));
+        OnPropertyChanged(nameof(BenchmarkProgressDisplay));
+        BenchmarkStatusDisplay = "正在准备本机 Benchmark；不会上传视频或读取用户媒体。";
+        try
+        {
+            var progress = new Progress<EncoderBenchmarkProgress>(ApplyBenchmarkProgress);
+            var result = await _benchmarkService.RunAsync(
+                _tools!,
+                _encoderCapabilities,
+                _operationCancellation!.Token,
+                progress);
+            if (result.Cancelled)
+            {
+                BenchmarkStatusDisplay = result.Message ?? "Benchmark 已取消；旧结果保持不变。";
+            }
+            else if (result.Snapshot is { } snapshot)
+            {
+                BenchmarkStatusDisplay = $"本机 Benchmark 已完成：{snapshot.Results.Count} 项，结果仅保存在本机。";
+            }
+            else
+            {
+                BenchmarkStatusDisplay = result.Message ?? "当前没有可测试的编码器。";
+            }
+            RefreshBenchmarkRows();
+        }
+        catch (OperationCanceledException)
+        {
+            BenchmarkStatusDisplay = "Benchmark 已取消；旧结果保持不变。";
+        }
+        catch (Exception exception)
+        {
+            DiagnosticLog.Write("benchmark", $"Benchmark 失败：{exception.Message}");
+            BenchmarkStatusDisplay = $"Benchmark 失败：{exception.Message}";
+        }
+        finally
+        {
+            IsBenchmarking = false;
+            EndOperation();
+        }
+    }
+
+    private void ApplyBenchmarkProgress(EncoderBenchmarkProgress update)
+    {
+        void Apply()
+        {
+            _benchmarkCompleted = update.Completed;
+            _benchmarkTotal = update.Total;
+            OnPropertyChanged(nameof(BenchmarkCompleted));
+            OnPropertyChanged(nameof(BenchmarkTotal));
+            OnPropertyChanged(nameof(BenchmarkProgressPercent));
+            OnPropertyChanged(nameof(BenchmarkProgressDisplay));
+            BenchmarkStatusDisplay = update.IsComplete
+                ? "Benchmark 测试完成，正在保存结果…"
+                : $"正在测试 {update.CurrentEncoderDisplay} · {update.CurrentWorkloadDisplay}";
+        }
+
+        if (_dispatcher.CheckAccess())
+        {
+            Apply();
+            return;
+        }
+
+        try
+        {
+            _dispatcher.BeginInvoke(Apply, DispatcherPriority.DataBind);
+        }
+        catch (InvalidOperationException)
+        {
+            // The window is closing; no UI progress is needed.
         }
     }
 
@@ -542,20 +785,24 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         var cancellationToken = _operationCancellation!.Token;
         Videos.Clear();
         var snapshot = Settings.Clone();
+        var executionPolicy = LongRunningTaskPolicyResolver.Resolve(snapshot, _encoderCapabilities);
         var pending = new List<Task>();
         var seenInputs = new ConcurrentDictionary<string, byte>(StringComparer.OrdinalIgnoreCase);
         var generatedPaths = new ConcurrentDictionary<string, byte>(StringComparer.OrdinalIgnoreCase);
+        var requiresProbe = _ruleEngine.RequiresProbe(snapshot.Rules) || CompressionPlanner.RequiresSourceProbe(snapshot);
         var started = 0;
         _scanCompleted = 0;
         _scanTotal = 0;
         _currentFile = string.Empty;
         _currentTaskItem = null;
         RefreshQueueProperties();
+        using var semaphore = new SemaphoreSlim(executionPolicy.MaxTotalWorkers, executionPolicy.MaxTotalWorkers);
+        using var probeSemaphore = new SemaphoreSlim(executionPolicy.ProbeConcurrency, executionPolicy.ProbeConcurrency);
+        using var sleepPrevention = CompressionSleepPrevention.Acquire(snapshot.PreventSleepDuringCompression);
         try
         {
             await PersistSettingsAsync();
             StatusMessage = "直接处理模式：不会预扫描整个目录，文件会逐个判断。";
-            using var semaphore = new SemaphoreSlim(snapshot.CompressionConcurrency, snapshot.CompressionConcurrency);
             await foreach (var path in _videoScannerService.EnumerateVideoPathsAsync(DirectoryPath, snapshot.RecursiveScan, cancellationToken))
             {
                 var fullPath = Path.GetFullPath(path);
@@ -570,8 +817,15 @@ public sealed class MainViewModel : ObservableObject, IDisposable
                 started++;
                 _scanTotal = started;
                 StatusMessage = $"直接处理：已发现 {started} 个视频，当前：{item.FileName}";
-                pending.Add(ProcessItemWithGateAsync(item, snapshot, semaphore, cancellationToken, generatedPaths));
-                if (pending.Count >= snapshot.CompressionConcurrency * 4)
+                pending.Add(ProcessItemWithGateAsync(
+                    item,
+                    snapshot,
+                    semaphore,
+                    cancellationToken,
+                    generatedPaths,
+                    probeSemaphore,
+                    requiresProbe));
+                if (pending.Count >= executionPolicy.MaxTotalWorkers * 4)
                 {
                     var completed = await Task.WhenAny(pending);
                     pending.Remove(completed);
@@ -583,7 +837,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
             _scanCompleted = started;
             StatusMessage = cancellationToken.IsCancellationRequested
                 ? "直接处理已取消。"
-                : $"直接处理完成：已检查 {started} 个视频。";
+                : $"直接处理完成：已检查 {started} 个视频。缓存命中 {_scanCacheHits}，实际 ffprobe {_scanActualProbes}。";
         }
         catch (OperationCanceledException)
         {
@@ -645,7 +899,8 @@ public sealed class MainViewModel : ObservableObject, IDisposable
                 DirectoryPath,
                 _tools!,
                 _encoderCapabilities,
-                cancellationToken);
+                cancellationToken,
+                GetTrustedBenchmarkSnapshot());
             if (session.Entries.Count == 0)
             {
                 var smartSkippedCount = session.PlanningNotes.Count(note => note.Contains("：智能跳过：", StringComparison.Ordinal));
@@ -657,8 +912,24 @@ public sealed class MainViewModel : ObservableObject, IDisposable
                 return;
             }
 
-            StatusMessage = $"已生成压缩计划：{session.Entries.Count} 个视频。请在“压缩任务”页面确认后开始。";
-            CompressionTaskReady?.Invoke(this, new CompressionTaskReadyEventArgs(session, _workflowService, _tools!));
+            var sessionPersistenceWarning = false;
+            try
+            {
+                // Persist the preview snapshot as soon as the plan exists. A
+                // crash before the user presses Start must not discard a
+                // carefully reviewed batch plan.
+                await _sessionStore.SaveAsync(session, cancellationToken);
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                sessionPersistenceWarning = true;
+                DiagnosticLog.Write("session", $"计划已生成，但无法保存恢复记录：{exception.Message}");
+            }
+
+            StatusMessage = sessionPersistenceWarning
+                ? $"已生成压缩计划：{session.Entries.Count} 个视频，但恢复记录保存失败。"
+                : $"已生成压缩计划：{session.Entries.Count} 个视频。请在“压缩任务”页面确认后开始。";
+            CompressionTaskReady?.Invoke(this, new CompressionTaskReadyEventArgs(session, _workflowService, _tools!, _encoderCapabilities));
         }
         catch (OperationCanceledException)
         {
@@ -679,9 +950,12 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         AppSettings snapshot,
         SemaphoreSlim semaphore,
         CancellationToken cancellationToken,
-        ConcurrentDictionary<string, byte>? generatedPaths = null)
+        ConcurrentDictionary<string, byte>? generatedPaths = null,
+        SemaphoreSlim? probeSemaphore = null,
+        bool requiresProbe = false)
     {
         var acquiredSemaphore = false;
+        var acquiredProbeSemaphore = false;
         try
         {
             item.Status = VideoTaskStatus.Queued;
@@ -689,17 +963,52 @@ public sealed class MainViewModel : ObservableObject, IDisposable
             _currentTaskItem = item;
             _currentFile = item.FileName;
             RefreshQueueProperties();
+
+            var source = item.Media;
+            if (probeSemaphore is not null && (requiresProbe || !source.HasProbeData || source.HealthStatus == MediaHealthStatus.NotChecked))
+            {
+                await probeSemaphore.WaitAsync(cancellationToken);
+                acquiredProbeSemaphore = true;
+                item.Status = VideoTaskStatus.Analyzing;
+                item.StatusDetail = "正在读取媒体信息…";
+                RefreshQueueProperties();
+                try
+                {
+                    var probeLookup = await _videoScannerService.ProbeCache.GetOrProbeAsync(
+                        _tools!,
+                        source.FullPath,
+                        _directProbeService,
+                        cancellationToken);
+                    source = probeLookup.Info;
+                    if (probeLookup.CacheHit)
+                    {
+                        Interlocked.Increment(ref _scanCacheHits);
+                    }
+                    else
+                    {
+                        Interlocked.Increment(ref _scanActualProbes);
+                    }
+                    item.UpdateMedia(source);
+                }
+                finally
+                {
+                    probeSemaphore.Release();
+                    acquiredProbeSemaphore = false;
+                }
+            }
+
             await semaphore.WaitAsync(cancellationToken);
             acquiredSemaphore = true;
             var progress = new Progress<WorkflowProgress>(update => ApplyWorkflowProgress(item, update));
             var result = await _workflowService.ProcessFileAsync(
-                item.Media,
+                source,
                 snapshot,
                 _tools!,
                 DirectoryPath,
                 progress,
                 cancellationToken,
-                _encoderCapabilities);
+                _encoderCapabilities,
+                GetTrustedBenchmarkSnapshot());
             if (result.SourceInfo is not null)
             {
                 item.UpdateMedia(result.SourceInfo);
@@ -740,6 +1049,10 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         }
         finally
         {
+            if (acquiredProbeSemaphore && probeSemaphore is not null)
+            {
+                probeSemaphore.Release();
+            }
             if (acquiredSemaphore)
             {
                 semaphore.Release();
@@ -869,6 +1182,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
                 OnPropertyChanged(nameof(EncoderCapabilities));
                 UpdateEncoderModes();
                 EncoderCapabilitySummary = BuildEncoderCapabilitySummary(capabilities);
+                RefreshBenchmarkRows();
                 var version = capabilities.Capabilities.Count == 0 ? null : "能力已检测";
                 FfmpegStatus = string.IsNullOrWhiteSpace(version) ? "已就绪" : $"已就绪 · {version}";
                 FfmpegToolTip = BuildFfmpegToolTip(tools, capabilities);
@@ -888,8 +1202,68 @@ public sealed class MainViewModel : ObservableObject, IDisposable
                 UpdateEncoderModes();
                 EncoderCapabilitySummary = $"硬件编码器检测失败：{exception.Message}";
                 FfmpegStatus = "已就绪（硬件未验证）";
+                RefreshBenchmarkRows();
             }, DispatcherPriority.Background, CancellationToken.None);
         }
+    }
+
+    private EncoderBenchmarkSnapshot? GetTrustedBenchmarkSnapshot()
+    {
+        try
+        {
+            return _benchmarkCache.GetCurrent(_encoderCapabilities);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException)
+        {
+            DiagnosticLog.Write("benchmark", $"读取本机 Benchmark 缓存失败：{exception.Message}");
+            return null;
+        }
+    }
+
+    private void RefreshBenchmarkRows()
+    {
+        EncoderBenchmarkSnapshot? snapshot = null;
+        try
+        {
+            snapshot = GetTrustedBenchmarkSnapshot();
+        }
+        catch (Exception exception)
+        {
+            DiagnosticLog.Write("benchmark", $"刷新 Benchmark 摘要失败：{exception.Message}");
+        }
+
+        _benchmarkRows.Clear();
+        foreach (var definition in EncoderCatalog.Definitions.Where(definition =>
+                     definition.Codec is VideoCodecKind.H264 or VideoCodecKind.H265))
+        {
+            var capability = _encoderCapabilities.Get(definition.Encoder);
+            var results = snapshot?.Results
+                .Where(result => result.Encoder == definition.Encoder ||
+                                 string.Equals(result.EncoderId, definition.Id, StringComparison.OrdinalIgnoreCase))
+                .OrderBy(result => result.WorkloadId, StringComparer.OrdinalIgnoreCase)
+                .ToArray() ?? [];
+            var status = capability is null
+                ? "尚未检测"
+                : capability.IsUsable
+                    ? results.Length == 0
+                        ? "可用 · 尚未测试"
+                        : string.Join("；", results.Select(result => $"{result.WorkloadDisplay} {result.SpeedDisplay}"))
+                    : CompactCapabilityReason(capability.UnavailableReason, "未通过能力检测");
+            _benchmarkRows.Add(new EncoderBenchmarkDisplayRow(
+                definition.Id,
+                definition.DisplayName,
+                capability?.IsUsable == true,
+                status,
+                results));
+        }
+
+        var warning = _benchmarkCache.LastLoadWarning;
+        BenchmarkStatusDisplay = snapshot is not null
+            ? snapshot.IsFresh
+                ? $"已有本机 Benchmark：{snapshot.CompletedAt.ToLocalTime():yyyy-MM-dd HH:mm}"
+                : $"已有本机 Benchmark：{snapshot.CompletedAt.ToLocalTime():yyyy-MM-dd HH:mm}（数据可能已过期，Auto 将降低置信度）"
+            : warning ?? "尚未进行本机性能测试。";
+        OnPropertyChanged(nameof(BenchmarkRows));
     }
 
     private void UpdateEncoderModes()
@@ -929,7 +1303,8 @@ public sealed class MainViewModel : ObservableObject, IDisposable
             candidate.IsHardware && candidate.Vendor == vendor && candidate.Codec == Settings.SelectedVideoCodec);
         return new EncoderSelectionOption(
             mode,
-            capability?.IsUsable == true,
+            capability?.IsUsable == true &&
+            capability.SupportsBitDepth(Settings.BitDepthPolicy == BitDepthPolicy.TenBit ? 10 : 8),
             capability is null
                 ? defaultReason
                 : CompactCapabilityReason(capability.UnavailableReason, defaultReason));
@@ -937,7 +1312,10 @@ public sealed class MainViewModel : ObservableObject, IDisposable
 
     private bool HasAnyUsableHardware(VideoCodecKind codec) =>
         _encoderCapabilities.Capabilities.Any(capability =>
-            capability.IsHardware && capability.Codec == codec && capability.IsUsable);
+            capability.IsHardware &&
+            capability.Codec == codec &&
+            capability.IsUsable &&
+            capability.SupportsBitDepth(Settings.BitDepthPolicy == BitDepthPolicy.TenBit ? 10 : 8));
 
     private static string BuildEncoderCapabilitySummary(EncoderCapabilitySet capabilities)
     {
@@ -1052,8 +1430,11 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         OnPropertyChanged(nameof(CurrentFile));
         OnPropertyChanged(nameof(ScanCompleted));
         OnPropertyChanged(nameof(ScanTotal));
+        OnPropertyChanged(nameof(ScanCacheHits));
+        OnPropertyChanged(nameof(ScanActualProbes));
         OnPropertyChanged(nameof(ScanProgressPercent));
         OnPropertyChanged(nameof(ScanProgressDisplay));
+        OnPropertyChanged(nameof(ScanProbeSummaryDisplay));
         OnPropertyChanged(nameof(CurrentFileProgressPercent));
         OnPropertyChanged(nameof(CurrentFileProgressDisplay));
         OnPropertyChanged(nameof(OverallProgressPercent));
@@ -1104,11 +1485,27 @@ public sealed class MainViewModel : ObservableObject, IDisposable
 
     private void OnSettingsPropertyChanged(object? sender, PropertyChangedEventArgs e)
     {
-        if (e.PropertyName is nameof(AppSettings.VideoEncoder) or nameof(AppSettings.TargetVideoCodec) or nameof(AppSettings.EncoderSelection))
+        if (e.PropertyName == nameof(AppSettings.EncoderTuningPreset))
+        {
+            // Keep the legacy serialized field aligned when the new UI
+            // changes tuning. This prevents a previously loaded 1.2.0 raw
+            // preset (for example, "slow") from overriding an intentional
+            // return to the new Balanced choice.
+            Settings.EncodingPreset = EncoderTuningCatalog.Resolve(
+                Settings.VideoEncoder,
+                Settings.EncoderTuningPreset);
+        }
+
+        if (e.PropertyName is nameof(AppSettings.VideoEncoder) or
+            nameof(AppSettings.TargetVideoCodec) or
+            nameof(AppSettings.EncoderSelection) or
+            nameof(AppSettings.BitDepthPolicy) or
+            nameof(AppSettings.EncoderTuningPreset))
         {
             OnPropertyChanged(nameof(Settings.SelectedVideoCodec));
             OnPropertyChanged(nameof(Settings.SelectedEncoderSelection));
             UpdateEncoderModes();
+            RefreshBenchmarkRows();
         }
     }
 
@@ -1238,6 +1635,31 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         {
             // A JSON write failure must not make the user unable to close the application.
         }
+
+        try
+        {
+            await WaitForCompletionAsync(FlushCachesAsync(), TimeSpan.FromSeconds(3));
+        }
+        catch (Exception)
+        {
+            // Cache persistence is best-effort during shutdown and must not
+            // reintroduce a closing deadlock.
+        }
+    }
+
+    private async Task FlushCachesAsync()
+    {
+        var flushes = new List<Task>
+        {
+            _videoScannerService.ProbeCache.FlushAsync()
+        };
+        if (_compressionTaskPlanner.ResultCache is { } resultCache)
+        {
+            flushes.Add(resultCache.FlushAsync());
+        }
+        flushes.Add(_benchmarkCache.FlushAsync());
+
+        await Task.WhenAll(flushes).ConfigureAwait(false);
     }
 
     private static async Task<bool> WaitForCompletionAsync(Task task, TimeSpan timeout)
@@ -1262,9 +1684,12 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     private bool CanRunDirectoryOperation() =>
         CanEditSettings() && !string.IsNullOrWhiteSpace(DirectoryPath) && Directory.Exists(DirectoryPath);
 
+    private bool CanRunBenchmark() => CanEditSettings() && !IsBenchmarking;
+
     private bool CanStartCompression() => CanEditSettings() && HasSelectedVideo;
 
     private static bool IsProcessable(VideoTaskItem item) =>
+        item.Media.HealthStatus != MediaHealthStatus.Corrupt &&
         item.Status is VideoTaskStatus.Waiting or VideoTaskStatus.Eligible or VideoTaskStatus.Skipped or VideoTaskStatus.Failed;
 
     private void OnVideosCollectionChanged(object? sender, NotifyCollectionChangedEventArgs e)
@@ -1434,7 +1859,9 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         ScanCommand.RaiseCanExecuteChanged();
         DirectProcessCommand.RaiseCanExecuteChanged();
         StartCompressionCommand.RaiseCanExecuteChanged();
+        RunBenchmarkCommand.RaiseCanExecuteChanged();
         StopCommand.RaiseCanExecuteChanged();
+        CancelBenchmarkCommand.RaiseCanExecuteChanged();
         SelectAllCommand.RaiseCanExecuteChanged();
         DeselectAllCommand.RaiseCanExecuteChanged();
         AddRuleCommand.RaiseCanExecuteChanged();
@@ -1443,26 +1870,36 @@ public sealed class MainViewModel : ObservableObject, IDisposable
 
     private static CompressionWorkflowService CreateWorkflowService()
     {
-        var ffprobe = new FFprobeService();
         return new CompressionWorkflowService(
             new RuleEngine(),
-            ffprobe,
-            new FFmpegService(),
-            new CompressionPlanner(),
+            DefaultProbeService,
+            DefaultFfmpegService,
+            new CompressionPlanner(resultCache: DefaultResultCache),
             new TargetSizeCalculator(),
             new OutputPathService(),
-            new SafeFileService(ffprobe));
+            new SafeFileService(DefaultProbeService),
+            probeCache: DefaultProbeCache,
+            healthCheckService: DefaultHealthCheckService);
     }
 
     private static CompressionTaskPlanner CreateCompressionTaskPlanner()
     {
-        var ffprobe = new FFprobeService();
         return new CompressionTaskPlanner(
             new RuleEngine(),
-            ffprobe,
-            new CompressionPlanner(),
+            DefaultProbeService,
+            new CompressionPlanner(resultCache: DefaultResultCache),
             new TargetSizeCalculator(),
             new OutputPathService(),
-            new VmafQualityCalibrationService());
+            new VmafQualityCalibrationService(),
+            DefaultProbeCache,
+            DefaultResultCache);
+    }
+
+    private static VideoScannerService CreateVideoScannerService()
+    {
+        return new VideoScannerService(
+            DefaultProbeService,
+            DefaultProbeCache,
+            DefaultHealthCheckService);
     }
 }

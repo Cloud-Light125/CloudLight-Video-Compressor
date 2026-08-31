@@ -68,7 +68,11 @@ public enum CompressionExecutionState
     [System.ComponentModel.Description("失败")]
     Failed,
     [System.ComponentModel.Description("放弃结果")]
-    Abandoned
+    Abandoned,
+    [System.ComponentModel.Description("上次运行中断")]
+    Interrupted,
+    [System.ComponentModel.Description("源文件已变化")]
+    SourceChanged
 }
 
 public sealed class CompressionTaskEntry : ObservableObject
@@ -83,6 +87,7 @@ public sealed class CompressionTaskEntry : ObservableObject
     private long? _actualOutputSizeBytes;
     private EncodingProgress? _latestEncoding;
     private CompressionProgress? _latestProgress;
+    private TimeSpan? _estimatedDuration;
     private bool _isDetailsExpanded;
     private CompressionJobResult? _result;
 
@@ -91,7 +96,8 @@ public sealed class CompressionTaskEntry : ObservableObject
         CompressionPlan plan,
         ConditionEvaluationResult conditionEvaluation,
         CompressionPlanComparison comparison,
-        CompressionJob? job = null)
+        CompressionJob? job = null,
+        MediaFileFingerprint? sourceFingerprint = null)
     {
         Source = source;
         Plan = plan;
@@ -99,6 +105,7 @@ public sealed class CompressionTaskEntry : ObservableObject
         SmartDecision = plan.SmartDecision;
         Comparison = comparison;
         Job = job ?? CompressionJob.Create(source, new AppSettings(), conditionEvaluation, null).WithPlan(plan);
+        SourceFingerprint = sourceFingerprint ?? MediaFileFingerprint.FromVideoInfo(source);
     }
 
     public VideoFileInfo Source { get; }
@@ -107,6 +114,7 @@ public sealed class CompressionTaskEntry : ObservableObject
     public ConditionEvaluationResult ConditionEvaluation { get; }
     public SmartCompressionDecision? SmartDecision { get; }
     public CompressionPlanComparison Comparison { get; }
+    public MediaFileFingerprint SourceFingerprint { get; }
     public CompressionJobResult? Result => _result;
 
     public CompressionExecutionState ExecutionState
@@ -122,6 +130,8 @@ public sealed class CompressionTaskEntry : ObservableObject
                 OnPropertyChanged(nameof(HasActualResult));
                 OnPropertyChanged(nameof(HasResultRejection));
                 OnPropertyChanged(nameof(IsValidationFailed));
+                OnPropertyChanged(nameof(ProgressEtaDisplay));
+                OnPropertyChanged(nameof(TimeEstimateDisplay));
             }
         }
     }
@@ -235,6 +245,16 @@ public sealed class CompressionTaskEntry : ObservableObject
     public string PlannedEncoderDisplay => EncoderCatalog.Get(Plan.Encoder).DisplayName;
     public string PlannedEncoderIdDisplay => CompressionPlan.FfmpegEncoderName(Plan.Encoder);
     public string PlannedCodecDisplay => Plan.EffectiveTargetCodec.GetDescription();
+    public string PlannedTuningDisplay => Plan.EncoderTuningPreset.GetDescription();
+    public string PlannedBitDepthDisplay => $"{Plan.TargetBitDepth}-bit · {Plan.TargetPixelFormat ?? "默认像素格式"}";
+    public string PlannedProfileDisplay => Plan.TargetProfile ?? "默认 profile";
+    public string HdrProtectionDisplay => Plan.IsHdrSource
+        ? $"HDR 保护：源 {Source.HdrSummaryDisplay} · 保留色彩标签{(Source.MasteringDisplayMetadata.Count > 0 || Source.ContentLightMetadata.Count > 0 ? "及 HDR 元数据" : string.Empty)}"
+        : $"色彩保护：{Source.HdrSummaryDisplay}";
+    public string AutoEncoderDecisionDisplay => Plan.AutoEncoderDecision is { } decision
+        ? $"Auto 选择：{EncoderCatalog.Get(decision.SelectedEncoder).DisplayName} · {decision.ConfidenceDisplay}置信度 · score {decision.SelectedScore:0.0}/100 · 回退：{(decision.FallbackChain.Count == 0 ? "无" : string.Join("、", decision.FallbackChain.Select(encoder => EncoderCatalog.Get(encoder).DisplayName)))}"
+        : string.Empty;
+    public bool HasAutoEncoderDecision => Plan.AutoEncoderDecision is not null;
     public string JobIdDisplay => Job.JobId[..Math.Min(12, Job.JobId.Length)];
     public string PlanIdDisplay => Plan.PlanId.ToString("N")[..12];
     public string RateControlDisplay => Plan.RateControlDisplay;
@@ -271,10 +291,10 @@ public sealed class CompressionTaskEntry : ObservableObject
     }
     public string QualityCalibrationDetailsDisplay => Plan.QualityCalibration is { IsAvailable: true } calibration
         ? string.Join(Environment.NewLine, calibration.Measurements.Select(measurement =>
-            $"{measurement.Quality:0.##} · {measurement.Score:0.0} VMAF · {measurement.Encoder.GetDescription()} · {measurement.Sample.StartSeconds:0.##}–{measurement.Sample.EndSeconds:0.##} 秒"))
+            $"{measurement.Quality:0.##} · {measurement.Score:0.0} VMAF · {measurement.Encoder.GetDescription()} · {measurement.Sample.StartSeconds:0.##}–{measurement.Sample.EndSeconds:0.##} 秒 · {measurement.Sample.ComplexityDisplay}"))
         : "—";
     public string CoreChangesDisplay => string.Join(" · ", Comparison.Parameters
-        .Where(parameter => parameter.Parameter is "视频编码" or "视频码率" or "分辨率" or "FPS" or "音频编码" or "音频码率")
+        .Where(parameter => parameter.Parameter is "视频编码" or "视频码率" or "分辨率" or "FPS" or "音频编码" or "音频码率" or "位深 / HDR" or "编码倾向")
         .Select(FormatCoreChange));
     public string CommandPreviewDisplay => BuildCommandPreviewDisplay();
     public string PlannedEncoderKindDisplay => EncoderCatalog.Get(Plan.Encoder).IsHardware ? "GPU 硬件编码" : "CPU 软件编码";
@@ -295,6 +315,18 @@ public sealed class CompressionTaskEntry : ObservableObject
     public string ProgressDisplay => $"{ProgressPercent:0.0}%";
     public string PlannedOutputSizeDisplay => Plan.EstimatedOutputDisplay;
     public string PlannedSavingDisplay => Plan.EstimatedSavingDisplay(Source.FileSizeBytes);
+    public bool HasPlanWarnings => Plan.Warnings.Count > 0;
+    public string PlanWarningsDisplay => Plan.Warnings.Count == 0
+        ? string.Empty
+        : string.Join(Environment.NewLine, Plan.Warnings);
+    public string StreamRetentionDisplay => Plan.StreamAudit?.SummaryDisplay
+        ?? (Source.AudioTrackCount > 0 || Source.SubtitleTrackCount > 0
+            ? $"音轨 {Source.AudioTrackCount} 条 · 字幕 {Source.SubtitleTrackCount} 条 · 按源容器保留"
+            : "无额外流");
+    public bool HasStreamAuditWarnings => Plan.StreamAudit?.Warnings.Count > 0;
+    public string StreamAuditWarningsDisplay => Plan.StreamAudit is { Warnings.Count: > 0 } audit
+        ? string.Join(Environment.NewLine, audit.Warnings)
+        : string.Empty;
     public string ResultHeading => HasActualResult ? "实际结果" : "计划压缩后";
     public string ResultSizeDisplay => ExecutionState == CompressionExecutionState.Completed && ActualOutputSizeBytes is { } actual
         ? $"{SourceSizeDisplay} → {DisplayFormat.FileSize(actual)}"
@@ -360,8 +392,46 @@ public sealed class CompressionTaskEntry : ObservableObject
     public string DecisionReasonDisplay => Plan.Reason ?? SmartDecision?.Reason ?? ConditionEvaluation.Summary;
     public string SmartExplanationDisplay => SmartDecision?.Explanation ?? string.Empty;
     public bool HasSmartExplanation => SmartDecision is not null;
-    public string ProgressEtaDisplay => _latestEncoding?.EtaDisplay ?? "—";
+    public EncodingProgress? LatestEncoding => _latestEncoding;
+    public CompressionProgress? LatestProgress => _latestProgress;
+    public TimeSpan? EstimatedDuration
+    {
+        get => _estimatedDuration;
+        private set
+        {
+            if (SetProperty(ref _estimatedDuration, value))
+            {
+                OnPropertyChanged(nameof(EstimatedDurationDisplay));
+                OnPropertyChanged(nameof(TimeEstimateDisplay));
+            }
+        }
+    }
+
+    public string EstimatedDurationDisplay => EstimatedDuration is { } duration
+        ? DisplayFormat.EstimatedDuration(duration)
+        : "等待速度样本";
+    public string ProgressEtaDisplay => ExecutionState switch
+    {
+        CompressionExecutionState.Compressing => _latestEncoding is { } encoding && encoding.IsEtaStable
+            ? encoding.EtaDisplay
+            : "计算中",
+        CompressionExecutionState.Verifying => "正在验证…",
+        CompressionExecutionState.Committing => "正在提交输出…",
+        CompressionExecutionState.Queued or CompressionExecutionState.WaitingToStart => EstimatedDurationDisplay,
+        _ => "—"
+    };
+    public string TimeEstimateDisplay => ExecutionState switch
+    {
+        CompressionExecutionState.Compressing => $"预计剩余 {ProgressEtaDisplay}",
+        CompressionExecutionState.Verifying => "正在验证…",
+        CompressionExecutionState.Committing => "正在提交输出…",
+        CompressionExecutionState.Queued or CompressionExecutionState.WaitingToStart => $"预计耗时 {EstimatedDurationDisplay}",
+        _ => "—"
+    };
     public string ProgressSpeedDisplay => _latestEncoding?.Speed ?? "—";
+    public string SmoothedEncodingSpeedDisplay => _latestEncoding?.SmoothedSpeed is { } speed
+        ? $"{speed:0.00}x"
+        : "—";
     public string ProgressBitrateDisplay => DisplayFormat.Bitrate(_latestEncoding?.BitrateBps);
     public string ProgressStageDisplay => _latestProgress?.Stage.GetDescription() ?? "—";
     public string AttemptsDisplay => Result?.Attempts is { Count: > 0 } attempts
@@ -377,6 +447,18 @@ public sealed class CompressionTaskEntry : ObservableObject
             ActualEncoder = encoder;
         }
 
+        if (progress.ResetEta)
+        {
+            _latestEncoding = null;
+            _latestProgress = null;
+            OnPropertyChanged(nameof(ProgressEtaDisplay));
+            OnPropertyChanged(nameof(TimeEstimateDisplay));
+            OnPropertyChanged(nameof(ProgressSpeedDisplay));
+            OnPropertyChanged(nameof(SmoothedEncodingSpeedDisplay));
+            OnPropertyChanged(nameof(ProgressBitrateDisplay));
+            OnPropertyChanged(nameof(ProgressStageDisplay));
+        }
+
         if (progress.Encoding is { } encoding)
         {
             _latestEncoding = encoding;
@@ -384,9 +466,21 @@ public sealed class CompressionTaskEntry : ObservableObject
             ProgressPercent = encoding.Percent;
             OnPropertyChanged(nameof(ProgressEtaDisplay));
             OnPropertyChanged(nameof(ProgressSpeedDisplay));
+            OnPropertyChanged(nameof(SmoothedEncodingSpeedDisplay));
             OnPropertyChanged(nameof(ProgressBitrateDisplay));
             OnPropertyChanged(nameof(ProgressStageDisplay));
+            OnPropertyChanged(nameof(TimeEstimateDisplay));
         }
+    }
+
+    public void ApplyEstimatedDuration(TimeSpan? duration)
+    {
+        if (duration is { } value && value < TimeSpan.Zero)
+        {
+            duration = TimeSpan.Zero;
+        }
+
+        EstimatedDuration = duration;
     }
 
     public void ApplyResult(CompressionJobResult result)
@@ -432,6 +526,59 @@ public sealed class CompressionTaskEntry : ObservableObject
         ExecutionState = CompressionExecutionState.Cancelled;
         StatusDetail = detail;
         FailureReason = detail;
+    }
+
+    public void MarkInterrupted(string detail = "上次应用退出时任务正在执行；恢复后将从头重新处理该视频。")
+    {
+        _latestEncoding = null;
+        _latestProgress = null;
+        ProgressPercent = 0;
+        ExecutionState = CompressionExecutionState.Interrupted;
+        StatusDetail = detail;
+        FailureReason = null;
+        OnPropertyChanged(nameof(ProgressEtaDisplay));
+        OnPropertyChanged(nameof(TimeEstimateDisplay));
+        OnPropertyChanged(nameof(ProgressSpeedDisplay));
+        OnPropertyChanged(nameof(SmoothedEncodingSpeedDisplay));
+        OnPropertyChanged(nameof(ProgressBitrateDisplay));
+        OnPropertyChanged(nameof(ProgressStageDisplay));
+    }
+
+    public void MarkSourceChanged(string detail = "源文件大小或修改时间已变化；必须重新规划后才能继续。")
+    {
+        ExecutionState = CompressionExecutionState.SourceChanged;
+        StatusDetail = detail;
+        FailureReason = detail;
+        ProgressPercent = 0;
+    }
+
+    public void RestoreSnapshot(
+        CompressionExecutionState state,
+        double progressPercent,
+        VideoEncoder? actualEncoder,
+        string statusDetail,
+        string? failureReason,
+        string? fallbackReason,
+        VideoFileInfo? finalVideoInfo,
+        long? actualOutputSizeBytes,
+        CompressionJobResult? result)
+    {
+        _result = result;
+        OnPropertyChanged(nameof(Result));
+        OnPropertyChanged(nameof(AttemptsDisplay));
+        OnPropertyChanged(nameof(HasActualEncoderResult));
+        OnPropertyChanged(nameof(HasResultRejection));
+        OnPropertyChanged(nameof(IsValidationFailed));
+        OnPropertyChanged(nameof(DiagnosticErrorDisplay));
+        OnPropertyChanged(nameof(FailureCategoryDisplay));
+        ActualEncoder = actualEncoder;
+        FinalVideoInfo = finalVideoInfo;
+        ActualOutputSizeBytes = actualOutputSizeBytes;
+        FallbackReason = fallbackReason;
+        FailureReason = failureReason;
+        StatusDetail = statusDetail;
+        ProgressPercent = progressPercent;
+        ExecutionState = state;
     }
 
     private static CompressionExecutionState ToExecutionState(VideoTaskStatus status) => status switch
@@ -493,16 +640,29 @@ public sealed class CompressionTaskSession
         IEnumerable<CompressionTaskEntry> entries,
         AppSettings settingsSnapshot,
         string scanRoot,
-        IReadOnlyList<string>? planningNotes = null)
+        IReadOnlyList<string>? planningNotes = null,
+        LongRunningTaskPolicy? executionPolicy = null,
+        string? sessionId = null,
+        DateTimeOffset? createdAt = null,
+        bool queuePaused = false)
     {
         Entries = new System.Collections.ObjectModel.ObservableCollection<CompressionTaskEntry>(entries);
         SettingsSnapshot = settingsSnapshot;
         ScanRoot = scanRoot;
         PlanningNotes = planningNotes ?? Array.Empty<string>();
+        ExecutionPolicy = executionPolicy ?? LongRunningTaskPolicy.ForSettings(settingsSnapshot, plannedEncoders: Entries.Select(entry => entry.Plan.Encoder));
+        SessionId = string.IsNullOrWhiteSpace(sessionId) ? Guid.NewGuid().ToString("N") : sessionId;
+        CreatedAt = createdAt ?? DateTimeOffset.UtcNow;
+        QueuePaused = queuePaused;
     }
 
     public System.Collections.ObjectModel.ObservableCollection<CompressionTaskEntry> Entries { get; }
     public AppSettings SettingsSnapshot { get; }
     public string ScanRoot { get; }
     public IReadOnlyList<string> PlanningNotes { get; }
+    public LongRunningTaskPolicy ExecutionPolicy { get; }
+    public EncodingPerformanceHistory PerformanceHistory { get; } = new();
+    public string SessionId { get; }
+    public DateTimeOffset CreatedAt { get; }
+    public bool QueuePaused { get; set; }
 }

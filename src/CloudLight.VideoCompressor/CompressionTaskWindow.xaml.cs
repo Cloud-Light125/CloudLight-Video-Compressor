@@ -10,30 +10,55 @@ namespace CloudLight.VideoCompressor;
 public partial class CompressionTaskWindow : Window
 {
     private readonly CompressionTaskViewModel _viewModel;
+    private bool _startImmediately;
     private bool _allowClose;
     private bool _closeRequested;
 
     public CompressionTaskWindow(
         CompressionTaskSession session,
         CompressionWorkflowService workflowService,
-        FFmpegTools tools)
+        FFmpegTools tools,
+        EncoderCapabilitySet? capabilities = null,
+        bool startImmediately = false)
     {
         InitializeComponent();
+        _startImmediately = startImmediately;
         _viewModel = new CompressionTaskViewModel(
             session,
             workflowService,
             tools,
-            Dispatcher);
+            Dispatcher,
+            capabilities: capabilities);
         DataContext = _viewModel;
         _viewModel.RequestClose += OnRequestClose;
+        Loaded += OnLoaded;
         Closing += OnClosing;
         Closed += OnClosed;
     }
 
     public CompressionTaskViewModel ViewModel => _viewModel;
 
+    private void OnLoaded(object sender, RoutedEventArgs e)
+    {
+        Loaded -= OnLoaded;
+        if (_startImmediately)
+        {
+            _startImmediately = false;
+            _viewModel.StartCompressionCommand.Execute(null);
+        }
+    }
+
     private void OnRequestClose(object? sender, EventArgs e)
     {
+        if (_viewModel.SettingsSnapshot.CompletionAction == CompletionAction.CloseApplication)
+        {
+            // The completion action is explicitly “close the application”,
+            // not merely close this modal task window. MainWindow's normal
+            // bounded shutdown path will still flush settings and caches.
+            System.Windows.Application.Current?.Shutdown();
+            return;
+        }
+
         _allowClose = true;
         Close();
     }
@@ -52,14 +77,15 @@ public partial class CompressionTaskWindow : Window
         }
 
         _closeRequested = true;
-        _viewModel.StopCommand.Execute(null);
-        _ = CloseAfterCancellationAsync();
+        _ = PrepareAndCloseAfterCancellationAsync();
     }
 
-    private async Task CloseAfterCancellationAsync()
+    private async Task PrepareAndCloseAfterCancellationAsync()
     {
         try
         {
+            await _viewModel.PrepareForShutdownRecoveryAsync();
+            _viewModel.StopCommand.Execute(null);
             await _viewModel.WaitForCompletionAsync();
         }
         catch
