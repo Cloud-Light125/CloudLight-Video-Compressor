@@ -6,7 +6,13 @@ using CloudLight.VideoCompressor.Models;
 namespace CloudLight.VideoCompressor.Services;
 
 public sealed record FFmpegTools(string FFmpegPath, string FFprobePath);
-public sealed record FFmpegCapabilities(IReadOnlySet<VideoEncoder> Encoders, string? Version);
+public sealed record FFmpegCapabilities(
+    IReadOnlySet<VideoEncoder> Encoders,
+    string? Version,
+    IReadOnlySet<string>? EncoderIds = null,
+    string? Command = null,
+    string? StandardError = null,
+    int ExitCode = 0);
 
 public sealed class FFmpegLocator
 {
@@ -67,15 +73,19 @@ public sealed class FFmpegLocator
         CancellationToken cancellationToken,
         TimeSpan? timeout = null)
     {
+        var ffmpegPath = Path.GetFullPath(tools.FFmpegPath);
         var startInfo = new ProcessStartInfo
         {
-            FileName = tools.FFmpegPath,
+            FileName = ffmpegPath,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             UseShellExecute = false,
             CreateNoWindow = true
         };
         startInfo.ArgumentList.Add("-encoders");
+        var command = $"\"{ffmpegPath}\" -encoders";
+        DiagnosticLog.Write("encoder-detect", $"FFmpeg path: {ffmpegPath}");
+        DiagnosticLog.Write("encoder-detect", $"encoders command: {command}");
 
         using var operationCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         operationCancellation.CancelAfter(timeout.GetValueOrDefault(TimeSpan.FromSeconds(10)));
@@ -106,7 +116,16 @@ public sealed class FFmpegLocator
             throw new IOException("FFmpeg 已退出，但编码器列表的 stdout/stderr 读取未在时限内结束。");
         }
 
-        var text = (await outputTask.ConfigureAwait(false)) + Environment.NewLine + (await errorTask.ConfigureAwait(false));
+        var output = await outputTask.ConfigureAwait(false);
+        var standardError = await errorTask.ConfigureAwait(false);
+        var text = output + Environment.NewLine + standardError;
+        DiagnosticLog.Write("encoder-detect", $"encoders exit code: {process.ExitCode}");
+        DiagnosticLog.Write("encoder-detect", $"encoders stderr:{Environment.NewLine}{LogText(standardError)}");
+
+        if (process.ExitCode != 0)
+        {
+            throw new InvalidOperationException($"FFmpeg -encoders 失败，exit code {process.ExitCode}：{LogText(standardError)}");
+        }
 
         var result = new HashSet<VideoEncoder>();
         var map = new Dictionary<string, VideoEncoder>(StringComparer.OrdinalIgnoreCase)
@@ -122,6 +141,9 @@ public sealed class FFmpegLocator
             ["libsvtav1"] = VideoEncoder.LibsvtAv1
         };
         var encoderIds = ParseEncoderIds(text);
+        DiagnosticLog.Write(
+            "encoder-detect",
+            $"encoders detected ({encoderIds.Count}): {string.Join(", ", encoderIds.Order(StringComparer.OrdinalIgnoreCase))}");
         foreach (var entry in map)
         {
             if (encoderIds.Contains(entry.Key))
@@ -130,7 +152,7 @@ public sealed class FFmpegLocator
             }
         }
 
-        return new FFmpegCapabilities(result, ExtractVersion(text));
+        return new FFmpegCapabilities(result, ExtractVersion(text), encoderIds, command, standardError, process.ExitCode);
     }
 
     private static async Task<string> ReadBoundedAsync(StreamReader reader, CancellationToken cancellationToken)
@@ -226,6 +248,12 @@ public sealed class FFmpegLocator
         }
 
         var version = line["ffmpeg version ".Length..].Split(' ', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault();
-        return string.IsNullOrWhiteSpace(version) ? null : version.TrimStart('n', 'N').Split('-')[0];
+        return string.IsNullOrWhiteSpace(version) ? null : version.TrimStart('n', 'N');
+    }
+
+    private static string LogText(string text)
+    {
+        var value = string.IsNullOrWhiteSpace(text) ? "(empty)" : text.Trim();
+        return value.Length <= 8_000 ? value : value[^8_000..];
     }
 }

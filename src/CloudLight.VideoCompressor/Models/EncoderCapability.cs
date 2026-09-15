@@ -58,7 +58,12 @@ public sealed class EncoderCapabilitySet
     public EncoderCapabilitySet(
         IEnumerable<EncoderCapability> capabilities,
         string? ffmpegVersion = null,
-        string? capabilityFingerprint = null)
+        string? capabilityFingerprint = null,
+        string? gpuName = null,
+        string? nvidiaDriverVersion = null,
+        string? ffmpegPath = null,
+        DateTimeOffset? detectedAt = null,
+        bool fromCache = false)
     {
         Capabilities = capabilities.ToArray();
         _byEncoder = Capabilities
@@ -67,11 +72,21 @@ public sealed class EncoderCapabilitySet
         FFmpegVersion = ffmpegVersion ?? Capabilities.Select(capability => capability.FFmpegVersion)
             .FirstOrDefault(version => !string.IsNullOrWhiteSpace(version));
         CapabilityFingerprint = capabilityFingerprint ?? BuildCapabilityFingerprint(Capabilities);
+        GpuName = gpuName;
+        NvidiaDriverVersion = nvidiaDriverVersion;
+        FFmpegPath = ffmpegPath;
+        DetectedAt = detectedAt ?? DateTimeOffset.UtcNow;
+        FromCache = fromCache;
     }
 
     public IReadOnlyList<EncoderCapability> Capabilities { get; }
     public string? FFmpegVersion { get; }
     public string CapabilityFingerprint { get; }
+    public string? GpuName { get; }
+    public string? NvidiaDriverVersion { get; }
+    public string? FFmpegPath { get; }
+    public DateTimeOffset DetectedAt { get; }
+    public bool FromCache { get; }
 
     public bool IsUsable(VideoEncoder encoder) =>
         _byEncoder.TryGetValue(encoder, out var capability)

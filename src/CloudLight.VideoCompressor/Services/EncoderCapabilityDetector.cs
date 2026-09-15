@@ -7,28 +7,72 @@ public sealed class EncoderCapabilityDetector
     private readonly FFmpegLocator _ffmpegLocator;
     private readonly HardwareEncoderProbe _hardwareEncoderProbe;
     private readonly EncoderHelpProbe _encoderHelpProbe;
+    private readonly EncoderCapabilityCache _cache;
+    private readonly Func<CancellationToken, Task<HardwareEnvironmentIdentity>> _hardwareIdentityProvider;
+    private readonly Func<FFmpegTools, CancellationToken, Task<FFmpegCapabilities>> _capabilitiesProvider;
+    private readonly Func<FFmpegTools, VideoEncoder, CancellationToken, Task<EncoderHelpProbeResult>> _helpProvider;
+    private readonly Func<FFmpegTools, VideoEncoder, CancellationToken, int, Task<HardwareEncoderProbeResult>> _smokeProvider;
 
     public EncoderCapabilityDetector(
         FFmpegLocator? ffmpegLocator = null,
         HardwareEncoderProbe? hardwareEncoderProbe = null,
-        EncoderHelpProbe? encoderHelpProbe = null)
+        EncoderHelpProbe? encoderHelpProbe = null,
+        EncoderCapabilityCache? cache = null,
+        HardwareEnvironmentProbe? hardwareEnvironmentProbe = null,
+        Func<FFmpegTools, CancellationToken, Task<FFmpegCapabilities>>? capabilitiesProvider = null,
+        Func<FFmpegTools, VideoEncoder, CancellationToken, Task<EncoderHelpProbeResult>>? helpProvider = null,
+        Func<FFmpegTools, VideoEncoder, CancellationToken, int, Task<HardwareEncoderProbeResult>>? smokeProvider = null,
+        Func<CancellationToken, Task<HardwareEnvironmentIdentity>>? hardwareIdentityProvider = null)
     {
         _ffmpegLocator = ffmpegLocator ?? new FFmpegLocator();
         _hardwareEncoderProbe = hardwareEncoderProbe ?? new HardwareEncoderProbe();
         _encoderHelpProbe = encoderHelpProbe ?? new EncoderHelpProbe();
+        _cache = cache ?? new EncoderCapabilityCache();
+        var identityProbe = hardwareEnvironmentProbe ?? new HardwareEnvironmentProbe();
+        _hardwareIdentityProvider = hardwareIdentityProvider ?? identityProbe.ProbeAsync;
+        _capabilitiesProvider = capabilitiesProvider ?? ((tools, token) => _ffmpegLocator.GetCapabilitiesAsync(tools, token));
+        _helpProvider = helpProvider ?? ((tools, encoder, token) => _encoderHelpProbe.ProbeAsync(tools, encoder, token));
+        _smokeProvider = smokeProvider ?? ((tools, encoder, token, bitDepth) =>
+            _hardwareEncoderProbe.ProbeAsync(tools, encoder, token, bitDepth));
     }
 
     public async Task<EncoderCapabilitySet> DetectAsync(
         FFmpegTools tools,
         CancellationToken cancellationToken)
     {
-        var listed = await _ffmpegLocator.GetCapabilitiesAsync(tools, cancellationToken).ConfigureAwait(false);
+        var ffmpegPath = Path.GetFullPath(tools.FFmpegPath);
+        DiagnosticLog.Write("encoder-detect", $"detection started; FFmpeg path: {ffmpegPath}");
+        var listed = await _capabilitiesProvider(tools, cancellationToken).ConfigureAwait(false);
+        var hardwareIdentity = await _hardwareIdentityProvider(cancellationToken).ConfigureAwait(false);
+        var listedEncoderIds = listed.EncoderIds ?? listed.Encoders
+            .Select(encoder => CompressionPlan.FfmpegEncoderName(encoder))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        DiagnosticLog.Write(
+            "encoder-detect",
+            $"encoders result: exit code {listed.ExitCode}; detected: {string.Join(", ", listedEncoderIds.Order(StringComparer.OrdinalIgnoreCase))}");
+        if (!string.IsNullOrWhiteSpace(listed.StandardError))
+        {
+            DiagnosticLog.Write("encoder-detect", $"encoders stderr:{Environment.NewLine}{listed.StandardError.Trim()}");
+        }
+
+        var identity = new EncoderCapabilityCacheIdentity(
+            hardwareIdentity.GpuName,
+            hardwareIdentity.NvidiaDriverVersion,
+            listed.Version ?? "(unknown)",
+            ffmpegPath);
+        if (_cache.TryGet(identity, listedEncoderIds, out var cached, out var cacheMissReason))
+        {
+            DiagnosticLog.Write("encoder-capability-cache", $"CacheHit: {_cache.CachePath}; timestamp: {cached.DetectedAt:O}");
+            return cached;
+        }
+        DiagnosticLog.Write("encoder-capability-cache", $"CacheMiss: {_cache.CachePath}; reason: {cacheMissReason}");
+
         var capabilities = new List<EncoderCapability>();
         var probeTime = DateTimeOffset.UtcNow;
         foreach (var definition in EncoderCatalog.Definitions)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var present = listed.Encoders.Contains(definition.Encoder);
+            var present = listed.Encoders.Contains(definition.Encoder) || listedEncoderIds.Contains(definition.Id);
             var strategy = EncoderStrategyCatalog.Get(definition.Encoder);
             if (!present)
             {
@@ -57,7 +101,7 @@ public sealed class EncoderCapabilityDetector
             EncoderHelpProbeResult help;
             try
             {
-                help = await _encoderHelpProbe.ProbeAsync(tools, definition.Encoder, cancellationToken).ConfigureAwait(false);
+                help = await _helpProvider(tools, definition.Encoder, cancellationToken).ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
@@ -110,7 +154,7 @@ public sealed class EncoderCapabilityDetector
             HardwareEncoderProbeResult smoke;
             try
             {
-                smoke = await _hardwareEncoderProbe.ProbeAsync(tools, definition.Encoder, cancellationToken).ConfigureAwait(false);
+                smoke = await _smokeProvider(tools, definition.Encoder, cancellationToken, 8).ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
@@ -122,11 +166,13 @@ public sealed class EncoderCapabilityDetector
                 // hardware encoder from the settings page.
                 smoke = new HardwareEncoderProbeResult(false, exception.Message);
             }
+            LogSmokeResult(definition.Id, smoke);
             if (smoke.IsUsable && supportedBitDepths.Contains(10))
             {
                 try
                 {
-                    var tenBit = await _hardwareEncoderProbe.ProbeAsync(tools, definition.Encoder, cancellationToken, 10).ConfigureAwait(false);
+                    var tenBit = await _smokeProvider(tools, definition.Encoder, cancellationToken, 10).ConfigureAwait(false);
+                    LogSmokeResult($"{definition.Id} 10-bit", tenBit);
                     if (!tenBit.IsUsable)
                     {
                         supportedBitDepths = supportedBitDepths.Where(depth => depth != 10).ToArray();
@@ -178,7 +224,39 @@ public sealed class EncoderCapabilityDetector
                 $"{definition.Id} smoke test: {(smoke.IsUsable ? "success" : $"unavailable: {capability.UnavailableReason}")}");
         }
 
-        return new EncoderCapabilitySet(capabilities, listed.Version);
+        var result = new EncoderCapabilitySet(
+            capabilities,
+            listed.Version,
+            gpuName: hardwareIdentity.GpuName,
+            nvidiaDriverVersion: hardwareIdentity.NvidiaDriverVersion,
+            ffmpegPath: ffmpegPath,
+            detectedAt: probeTime);
+        try
+        {
+            await _cache.SaveAsync(identity, listedEncoderIds, result, cancellationToken).ConfigureAwait(false);
+            DiagnosticLog.Write("encoder-capability-cache", $"saved: {_cache.CachePath}; timestamp: {result.DetectedAt:O}");
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or System.Text.Json.JsonException or InvalidOperationException)
+        {
+            DiagnosticLog.Write("encoder-capability-cache", $"save failed; detection result remains valid: {exception.Message}");
+        }
+        return result;
+    }
+
+    private static void LogSmokeResult(string encoderId, HardwareEncoderProbeResult smoke)
+    {
+        if (!string.IsNullOrWhiteSpace(smoke.Command))
+        {
+            DiagnosticLog.Write("encoder-detect", $"{encoderId} smoke command: {smoke.Command}");
+        }
+        DiagnosticLog.Write("encoder-detect", $"{encoderId} smoke exit code: {smoke.ExitCode?.ToString() ?? "(not started)"}");
+        DiagnosticLog.Write(
+            "encoder-detect",
+            $"{encoderId} smoke stderr:{Environment.NewLine}{(string.IsNullOrWhiteSpace(smoke.StandardError) ? "(empty)" : smoke.StandardError.Trim())}");
     }
 
     private static IReadOnlyList<int> GetSupportedBitDepths(IReadOnlyList<string> formats) =>

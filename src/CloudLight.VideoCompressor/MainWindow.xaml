@@ -974,6 +974,10 @@
                                                       ToolTip="自动会保留检测到的 10-bit/Main10/HDR；8-bit 选项会提示可能的色阶或 HDR 信息损失。" />
                                         </Grid>
                                         <Grid>
+                                            <Grid.RowDefinitions>
+                                                <RowDefinition Height="Auto" />
+                                                <RowDefinition Height="Auto" />
+                                            </Grid.RowDefinitions>
                                             <Grid.ColumnDefinitions>
                                                 <ColumnDefinition Width="112" />
                                                 <ColumnDefinition Width="*" />
@@ -997,6 +1001,12 @@
                                                     </DataTemplate>
                                                 </ComboBox.ItemTemplate>
                                             </ComboBox>
+                                            <TextBlock Grid.Row="1"
+                                                       Grid.Column="1"
+                                                       Margin="0,7,0,0"
+                                                       Foreground="#166534"
+                                                       Text="{Binding NvidiaCapabilityDisplay}"
+                                                       TextWrapping="Wrap" />
                                         </Grid>
                                     </StackPanel>
                                 </GroupBox>

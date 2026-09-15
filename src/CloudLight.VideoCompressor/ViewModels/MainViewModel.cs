@@ -65,6 +65,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     private string _ffmpegToolTip = string.Empty;
     private string _statusMessage = "请选择目录后扫描，或直接处理目录。";
     private string _encoderCapabilitySummary = "正在检测硬件编码器…";
+    private string _nvidiaCapabilityDisplay = "NVIDIA NVENC：正在检测…";
     private bool _isBusy;
     private CompressionRule? _selectedRule;
     private AppSettings _settings = new();
@@ -247,6 +248,12 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     {
         get => _encoderCapabilitySummary;
         private set => SetProperty(ref _encoderCapabilitySummary, value);
+    }
+
+    public string NvidiaCapabilityDisplay
+    {
+        get => _nvidiaCapabilityDisplay;
+        private set => SetProperty(ref _nvidiaCapabilityDisplay, value);
     }
     public bool IsBenchmarking
     {
@@ -1182,6 +1189,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
                 OnPropertyChanged(nameof(EncoderCapabilities));
                 UpdateEncoderModes();
                 EncoderCapabilitySummary = BuildEncoderCapabilitySummary(capabilities);
+                NvidiaCapabilityDisplay = BuildNvidiaCapabilityDisplay(capabilities);
                 RefreshBenchmarkRows();
                 var version = capabilities.Capabilities.Count == 0 ? null : "能力已检测";
                 FfmpegStatus = string.IsNullOrWhiteSpace(version) ? "已就绪" : $"已就绪 · {version}";
@@ -1201,6 +1209,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
                 OnPropertyChanged(nameof(EncoderCapabilities));
                 UpdateEncoderModes();
                 EncoderCapabilitySummary = $"硬件编码器检测失败：{exception.Message}";
+                NvidiaCapabilityDisplay = "NVIDIA NVENC 不可用（能力检测失败）";
                 FfmpegStatus = "已就绪（硬件未验证）";
                 RefreshBenchmarkRows();
             }, DispatcherPriority.Background, CancellationToken.None);
@@ -1288,9 +1297,19 @@ public sealed class MainViewModel : ObservableObject, IDisposable
             "未检测到可用的 AMD AMF 编码环境"));
 
         var selectedOption = EncoderModes.FirstOrDefault(option => option.Mode == selected);
-        if (selectedOption is null || !selectedOption.IsAvailable)
+        if (selectedOption is null)
         {
             Settings.SelectedEncoderSelection = EncoderSelectionMode.CpuSoftware;
+        }
+        else if (!selectedOption.IsAvailable)
+        {
+            // Preserve an explicit NVENC/QSV/AMF preference across a transient
+            // probe failure. Planning still performs the existing safe CPU/QSV
+            // fallback, while a later successful detection can restore the
+            // user's preferred hardware without a persistent forced-CPU state.
+            DiagnosticLog.Write(
+                "encoder-detect",
+                $"preserving unavailable encoder preference {selected}; runtime fallback remains enabled");
         }
     }
 
@@ -1336,6 +1355,34 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         $"ffmpeg.exe：{tools.FFmpegPath}{Environment.NewLine}ffprobe.exe：{tools.FFprobePath}{Environment.NewLine}" +
         string.Join(Environment.NewLine, capabilities.Capabilities.Select(capability =>
             $"{capability.Id}: {(capability.IsUsable ? "可用" : CompactCapabilityReason(capability.UnavailableReason, "未通过能力检测"))}"));
+
+    private static string BuildNvidiaCapabilityDisplay(EncoderCapabilitySet capabilities)
+    {
+        var nvencAvailable = capabilities.Capabilities.Any(capability =>
+            capability.Vendor == EncoderVendor.Nvidia && capability.IsUsable);
+        if (!nvencAvailable)
+        {
+            return "NVIDIA NVENC 不可用";
+        }
+
+        var gpu = CompactGpuName(capabilities.GpuName);
+        return string.IsNullOrWhiteSpace(gpu)
+            ? "NVIDIA NVENC 可用"
+            : $"NVIDIA NVENC 可用{Environment.NewLine}GPU: {gpu}";
+    }
+
+    private static string? CompactGpuName(string? gpuName)
+    {
+        if (string.IsNullOrWhiteSpace(gpuName) || gpuName == "(none)")
+        {
+            return null;
+        }
+
+        return gpuName
+            .Replace("NVIDIA GeForce ", string.Empty, StringComparison.OrdinalIgnoreCase)
+            .Replace("NVIDIA ", string.Empty, StringComparison.OrdinalIgnoreCase)
+            .Trim();
+    }
 
     private static string CompactCapabilityReason(string? reason, string fallback)
     {

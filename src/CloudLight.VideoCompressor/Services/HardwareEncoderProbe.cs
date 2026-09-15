@@ -4,7 +4,13 @@ using CloudLight.VideoCompressor.Models;
 
 namespace CloudLight.VideoCompressor.Services;
 
-public sealed record HardwareEncoderProbeResult(bool IsUsable, string? Error, bool TimedOut = false);
+public sealed record HardwareEncoderProbeResult(
+    bool IsUsable,
+    string? Error,
+    bool TimedOut = false,
+    string? Command = null,
+    string? StandardError = null,
+    int? ExitCode = null);
 
 /// <summary>
 /// Performs a tiny encoder initialization test without touching a user file.
@@ -24,20 +30,21 @@ public sealed class HardwareEncoderProbe
         CancellationToken cancellationToken,
         int targetBitDepth = 8)
     {
+        var ffmpegPath = Path.GetFullPath(tools.FFmpegPath);
         var startInfo = new ProcessStartInfo
         {
-            FileName = tools.FFmpegPath,
+            FileName = ffmpegPath,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             UseShellExecute = false,
             CreateNoWindow = true
         };
-        var arguments = new List<string>
-        {
-            "-hide_banner", "-loglevel", "error",
-            "-f", "lavfi", "-i", "color=c=black:s=128x72:r=1",
-            "-frames:v", "2", "-an", "-c:v", CompressionPlan.FfmpegEncoderName(encoder)
-        };
+        var isNvenc = encoder is VideoEncoder.H264Nvenc or VideoEncoder.HevcNvenc;
+        var arguments = new List<string> { "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i" };
+        arguments.Add(isNvenc
+            ? "testsrc2=size=1280x720:rate=30"
+            : "color=c=black:s=128x72:r=1");
+        arguments.AddRange(["-frames:v", isNvenc ? "3" : "2", "-an", "-c:v", CompressionPlan.FfmpegEncoderName(encoder)]);
         if (targetBitDepth >= 10)
         {
             arguments.AddRange(["-vf", "format=p010le", "-pix_fmt", "p010le"]);
@@ -45,12 +52,14 @@ public sealed class HardwareEncoderProbe
         }
         arguments.AddRange(
         [
-            "-f", "null", "-"
+            "-f", "null", OperatingSystem.IsWindows() ? "NUL" : "/dev/null"
         ]);
         foreach (var argument in arguments)
         {
             startInfo.ArgumentList.Add(argument);
         }
+        var command = FormatCommand(ffmpegPath, arguments);
+        DiagnosticLog.Write("encoder-detect", $"{CompressionPlan.FfmpegEncoderName(encoder)} smoke command: {command}");
 
         using var timeoutCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeoutCancellation.CancelAfter(_timeout);
@@ -75,18 +84,24 @@ public sealed class HardwareEncoderProbe
                 throw;
             }
 
-            return new HardwareEncoderProbeResult(false, "硬件编码 smoke test 超时。", true);
+            DiagnosticLog.Write("encoder-detect", $"{CompressionPlan.FfmpegEncoderName(encoder)} smoke exit code: (timeout)");
+            DiagnosticLog.Write("encoder-detect", $"{CompressionPlan.FfmpegEncoderName(encoder)} smoke stderr: (reader cancelled after timeout)");
+            return new HardwareEncoderProbeResult(false, "硬件编码 smoke test 超时。", true, command, null, null);
         }
 
         if (!await WaitForReadersWithinAsync(outputTask, errorTask, TimeSpan.FromSeconds(3)).ConfigureAwait(false))
         {
-            return new HardwareEncoderProbeResult(false, "硬件编码 smoke test 的输出读取超时。", true);
+            DiagnosticLog.Write("encoder-detect", $"{CompressionPlan.FfmpegEncoderName(encoder)} smoke exit code: {process.ExitCode}");
+            DiagnosticLog.Write("encoder-detect", $"{CompressionPlan.FfmpegEncoderName(encoder)} smoke stderr: (read timeout)");
+            return new HardwareEncoderProbeResult(false, "硬件编码 smoke test 的输出读取超时。", true, command, null, process.ExitCode);
         }
 
         var error = await errorTask.ConfigureAwait(false);
+        DiagnosticLog.Write("encoder-detect", $"{CompressionPlan.FfmpegEncoderName(encoder)} smoke exit code: {process.ExitCode}");
+        DiagnosticLog.Write("encoder-detect", $"{CompressionPlan.FfmpegEncoderName(encoder)} smoke stderr:{Environment.NewLine}{LogText(error)}");
         return process.ExitCode == 0
-            ? new HardwareEncoderProbeResult(true, null)
-            : new HardwareEncoderProbeResult(false, TrimError(error));
+            ? new HardwareEncoderProbeResult(true, null, false, command, error, process.ExitCode)
+            : new HardwareEncoderProbeResult(false, TrimError(error), false, command, error, process.ExitCode);
     }
 
     private static async Task<string> ReadBoundedAsync(StreamReader reader, CancellationToken cancellationToken)
@@ -163,4 +178,18 @@ public sealed class HardwareEncoderProbe
 
     private static string TrimError(string text) =>
         string.IsNullOrWhiteSpace(text) ? "未返回错误文本。" : text.Trim()[..Math.Min(text.Trim().Length, 1_000)];
+
+    private static string LogText(string text)
+    {
+        var value = string.IsNullOrWhiteSpace(text) ? "(empty)" : text.Trim();
+        return value.Length <= 8_000 ? value : value[^8_000..];
+    }
+
+    private static string FormatCommand(string executable, IEnumerable<string> arguments) =>
+        $"\"{executable}\" {string.Join(' ', arguments.Select(QuoteArgument))}";
+
+    private static string QuoteArgument(string argument) =>
+        argument.Any(char.IsWhiteSpace) || argument.Contains('"')
+            ? $"\"{argument.Replace("\"", "\\\"")}\""
+            : argument;
 }
