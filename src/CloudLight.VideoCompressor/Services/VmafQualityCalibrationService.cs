@@ -187,8 +187,18 @@ public static class VmafSampleSelector
 /// </summary>
 public sealed class VmafComplexityAnalyzer
 {
-    private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan DefaultTimeout = TimeSpan.FromSeconds(30);
     private const int MaximumOutputCharacters = 256_000;
+    private readonly TimeSpan _timeout;
+
+    public VmafComplexityAnalyzer(TimeSpan? timeout = null)
+    {
+        _timeout = timeout ?? DefaultTimeout;
+        if (_timeout < TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(nameof(timeout));
+        }
+    }
 
     public async Task<IReadOnlyList<VmafComplexitySignal>> AnalyzeAsync(
         VideoFileInfo source,
@@ -216,7 +226,7 @@ public sealed class VmafComplexityAnalyzer
         startInfo.ArgumentList.Add("NUL");
 
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        timeout.CancelAfter(Timeout);
+        timeout.CancelAfter(_timeout);
         using var process = new Process { StartInfo = startInfo };
         try
         {
@@ -239,6 +249,12 @@ public sealed class VmafComplexityAnalyzer
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             throw;
+        }
+        catch (OperationCanceledException) when (timeout.IsCancellationRequested)
+        {
+            MediaProcessRegistry.TryTerminate(process);
+            DiagnosticLog.Write("vmaf", "复杂度分析超过时限，使用固定抽样。");
+            return [];
         }
         catch (Exception exception) when (exception is InvalidOperationException or IOException or
                                             System.ComponentModel.Win32Exception or TimeoutException)

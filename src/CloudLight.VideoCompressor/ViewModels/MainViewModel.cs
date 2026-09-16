@@ -938,12 +938,13 @@ public sealed class MainViewModel : ObservableObject, IDisposable
                 : $"已生成压缩计划：{session.Entries.Count} 个视频。请在“压缩任务”页面确认后开始。";
             CompressionTaskReady?.Invoke(this, new CompressionTaskReadyEventArgs(session, _workflowService, _tools!, _encoderCapabilities));
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             StatusMessage = "压缩已取消。";
         }
         catch (Exception exception)
         {
+            DiagnosticLog.Write("session", $"生成压缩计划失败：{exception}");
             StatusMessage = $"批量压缩失败：{exception.Message}";
         }
         finally

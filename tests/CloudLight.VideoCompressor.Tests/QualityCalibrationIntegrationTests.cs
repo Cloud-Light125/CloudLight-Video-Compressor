@@ -9,6 +9,28 @@ public sealed class QualityCalibrationIntegrationTests
     private const string ToolDirectoryVariable = "CLOUDLIGHT_FFMPEG_TEST_DIR";
 
     [Fact]
+    public async Task ComplexityAnalysisTimeout_FallsBackWithoutCancellingThePlan()
+    {
+        var tools = ResolveBundledTools();
+        using var directory = new TemporaryDirectory();
+        var sourcePath = Path.Combine(directory.Path, "complexity-source.mp4");
+        await CreateVideoAsync(tools.FFmpegPath, sourcePath);
+        var source = await new FFprobeService().ProbeAsync(tools, sourcePath, CancellationToken.None);
+
+        var signals = await new VmafComplexityAnalyzer(TimeSpan.Zero).AnalyzeAsync(
+            source, tools, CancellationToken.None);
+
+        Assert.Empty(signals);
+        Assert.NotEmpty(VmafSampleSelector.SelectComplexityAware(
+            source.DurationSeconds!.Value, 5, 3, signals));
+
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            new VmafComplexityAnalyzer().AnalyzeAsync(source, tools, cancellation.Token));
+    }
+
+    [Fact]
     [Trait("Category", "Integration")]
     public async Task RealVmaf_CalibratesRepresentativeSamplesWhenFilterExists()
     {
@@ -89,6 +111,18 @@ public sealed class QualityCalibrationIntegrationTests
         await stdout;
         var error = await stderr;
         Assert.True(process.ExitCode == 0, $"无法生成 VMAF 测试视频：{error}");
+    }
+
+    private static FFmpegTools ResolveBundledTools()
+    {
+        var root = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", ".."));
+        var directory = Path.Combine(root, "third_party", "ffmpeg");
+        var tools = new FFmpegTools(
+            Path.Combine(directory, "ffmpeg.exe"),
+            Path.Combine(directory, "ffprobe.exe"));
+        Assert.True(File.Exists(tools.FFmpegPath) && File.Exists(tools.FFprobePath),
+            $"测试所需的仓库内 FFmpeg 不存在：{directory}");
+        return tools;
     }
 
     private sealed class TemporaryDirectory : IDisposable
