@@ -157,6 +157,131 @@ public sealed class CompressionTaskTests
     }
 
     [Fact]
+    public async Task TargetBitrate_H265Nvenc_DoesNotInvokeVmafCalibration()
+    {
+        var calibration = new RecordingVmafQualityCalibrationService();
+        var settings = new AppSettings
+        {
+            CompressionMode = CompressionMode.Bitrate,
+            TargetVideoBitrateMbps = 10,
+            TargetVideoCodec = VideoCodecKind.H265,
+            EncoderSelection = EncoderSelectionMode.NvidiaNvenc,
+            // Reproduces a persisted Smart-mode option after the user switches
+            // to a manual bitrate plan.
+            EnableAdvancedQualityCalibration = true
+        };
+
+        var session = await CreatePlanner(calibration).CreateSessionAsync(
+            [MatchingItem(Media("target-bitrate-nvenc.mp4", videoBitrate: 30_000_000))],
+            settings,
+            Path.GetTempPath(),
+            FakeTools(),
+            Capabilities(VideoEncoder.HevcNvenc),
+            CancellationToken.None);
+
+        var entry = Assert.Single(session.Entries);
+        Assert.Equal(VideoEncoder.HevcNvenc, entry.Plan.Encoder);
+        Assert.Equal(RateControlMode.AverageBitrate, entry.Plan.EffectiveRateControlMode);
+        Assert.Equal(10_000_000, entry.Plan.TargetVideoBitrateBps);
+        Assert.Equal(0, calibration.CallCount);
+    }
+
+    [Fact]
+    public async Task CrfAuto_SmartVmafMode_AllowsVmafCalibration()
+    {
+        var calibration = new RecordingVmafQualityCalibrationService();
+        var settings = new AppSettings
+        {
+            // Smart + VMAF is the application's automatic CRF/CQ selection
+            // mode. Plain CompressionMode.Crf remains a fixed user value.
+            CompressionMode = CompressionMode.SmartAutomatic,
+            EnableAdvancedQualityCalibration = true,
+            TargetVideoCodec = VideoCodecKind.H265,
+            EncoderSelection = EncoderSelectionMode.CpuSoftware
+        };
+
+        var session = await CreatePlanner(calibration).CreateSessionAsync(
+            [MatchingItem(Media("crf-auto.mp4", fileSizeBytes: 2_000_000_000, videoBitrate: 30_000_000))],
+            settings,
+            Path.GetTempPath(),
+            FakeTools(),
+            EncoderCapabilitySet.SoftwareDefaults,
+            CancellationToken.None);
+
+        Assert.Single(session.Entries);
+        Assert.Equal(1, calibration.CallCount);
+        Assert.Equal(RateControlMode.AverageBitrate, calibration.LastRateControlMode);
+    }
+
+    [Fact]
+    public async Task TargetSize_DoesNotInvokeVmafCalibration()
+    {
+        var calibration = new RecordingVmafQualityCalibrationService();
+        var settings = new AppSettings
+        {
+            CompressionMode = CompressionMode.TargetSize,
+            TargetSize = "700 MB",
+            TargetVideoCodec = VideoCodecKind.H265,
+            EncoderSelection = EncoderSelectionMode.CpuSoftware,
+            EnableAdvancedQualityCalibration = true
+        };
+
+        var session = await CreatePlanner(calibration).CreateSessionAsync(
+            [MatchingItem(Media("target-size-no-vmaf.mp4", fileSizeBytes: 2_000_000_000, videoBitrate: 30_000_000))],
+            settings,
+            Path.GetTempPath(),
+            FakeTools(),
+            EncoderCapabilitySet.SoftwareDefaults,
+            CancellationToken.None);
+
+        var entry = Assert.Single(session.Entries);
+        Assert.Equal(RateControlMode.TargetSizeTwoPass, entry.Plan.EffectiveRateControlMode);
+        Assert.NotNull(entry.Plan.TargetVideoBitrateBps);
+        Assert.Equal(0, calibration.CallCount);
+    }
+
+    [Fact]
+    public async Task FixedCrf_DoesNotInvokeVmafCalibration()
+    {
+        var calibration = new RecordingVmafQualityCalibrationService();
+        var settings = new AppSettings
+        {
+            CompressionMode = CompressionMode.Crf,
+            Crf = 24,
+            EnableAdvancedQualityCalibration = true
+        };
+
+        var session = await CreatePlanner(calibration).CreateSessionAsync(
+            [MatchingItem(Media("fixed-crf.mp4", videoBitrate: 30_000_000))],
+            settings,
+            Path.GetTempPath(),
+            FakeTools(),
+            EncoderCapabilitySet.SoftwareDefaults,
+            CancellationToken.None);
+
+        Assert.Single(session.Entries);
+        Assert.Equal(0, calibration.CallCount);
+    }
+
+    [Fact]
+    public async Task VmafService_TargetBitrateGuardReturnsBeforeFfmpegProbe()
+    {
+        var result = await new VmafQualityCalibrationService().CalibrateAsync(
+            Media("guard-before-ffmpeg.mp4"),
+            new AppSettings
+            {
+                CompressionMode = CompressionMode.Bitrate,
+                EnableAdvancedQualityCalibration = true
+            },
+            VideoEncoder.HevcNvenc,
+            new FFmpegTools("must-not-start-ffmpeg.exe", "must-not-start-ffprobe.exe"),
+            CancellationToken.None);
+
+        Assert.False(result.IsAvailable);
+        Assert.Contains("指定视频码率", result.Message);
+    }
+
+    [Fact]
     public void Fallback_UpdatesActualEncoderButKeepsPlannedEncoder()
     {
         var plan = new CompressionPlan(
@@ -282,7 +407,7 @@ public sealed class CompressionTaskTests
         Assert.DoesNotContain("-pass", arguments);
     }
 
-    private static CompressionTaskPlanner CreatePlanner()
+    private static CompressionTaskPlanner CreatePlanner(IVmafQualityCalibrationService? qualityCalibrationService = null)
     {
         var probe = new FFprobeService();
         return new CompressionTaskPlanner(
@@ -290,7 +415,27 @@ public sealed class CompressionTaskTests
             probe,
             new CompressionPlanner(),
             new TargetSizeCalculator(),
-            new OutputPathService());
+            new OutputPathService(),
+            qualityCalibrationService);
+    }
+
+    private sealed class RecordingVmafQualityCalibrationService : IVmafQualityCalibrationService
+    {
+        public int CallCount { get; private set; }
+        public RateControlMode? LastRateControlMode { get; private set; }
+
+        public Task<VmafCalibrationResult> CalibrateAsync(
+            VideoFileInfo source,
+            AppSettings settings,
+            VideoEncoder encoder,
+            RateControlMode rateControlMode,
+            FFmpegTools tools,
+            CancellationToken cancellationToken)
+        {
+            CallCount++;
+            LastRateControlMode = rateControlMode;
+            return Task.FromResult(VmafCalibrationResult.Unavailable("测试质量校准服务未启动 FFmpeg。"));
+        }
     }
 
     private static VideoTaskItem MatchingItem(VideoFileInfo media)

@@ -15,7 +15,7 @@ public sealed class CompressionTaskPlanner
     private readonly CompressionPlanner _compressionPlanner;
     private readonly TargetSizeCalculator _targetSizeCalculator;
     private readonly OutputPathService _outputPathService;
-    private readonly VmafQualityCalibrationService? _qualityCalibrationService;
+    private readonly IVmafQualityCalibrationService? _qualityCalibrationService;
     private readonly MediaProbeCache? _probeCache;
     private readonly CompressionResultCache? _resultCache;
 
@@ -25,7 +25,7 @@ public sealed class CompressionTaskPlanner
         CompressionPlanner compressionPlanner,
         TargetSizeCalculator targetSizeCalculator,
         OutputPathService outputPathService,
-        VmafQualityCalibrationService? qualityCalibrationService = null,
+        IVmafQualityCalibrationService? qualityCalibrationService = null,
         MediaProbeCache? probeCache = null,
         CompressionResultCache? resultCache = null)
     {
@@ -107,7 +107,18 @@ public sealed class CompressionTaskPlanner
                 continue;
             }
 
-            if (settingsSnapshot.EnableAdvancedQualityCalibration)
+            var qualitySearch = VmafQualitySearchPolicy.Evaluate(
+                settingsSnapshot,
+                plan.EffectiveRateControlMode);
+            if (!qualitySearch.ShouldRun)
+            {
+                VmafQualitySearchPolicy.WriteDiagnostic(
+                    qualitySearch,
+                    plan.EffectiveRateControlMode,
+                    settingsSnapshot.EnableAdvancedQualityCalibration,
+                    source.FullPath);
+            }
+            else
             {
                 var cachedCalibration = _resultCache?.TryGet(source, settingsSnapshot, out var cachedResult) == true
                     ? cachedResult.VmafCalibrationResult
@@ -119,8 +130,22 @@ public sealed class CompressionTaskPlanner
                         source,
                         settingsSnapshot,
                         plan.Encoder,
+                        plan.EffectiveRateControlMode,
                         tools,
                         cancellationToken).ConfigureAwait(false);
+                }
+                else
+                {
+                    VmafQualitySearchPolicy.WriteDiagnostic(
+                        qualitySearch with
+                        {
+                            Reason = calibration is null
+                                ? "已请求质量搜索，但未配置质量校准服务。"
+                                : "使用已缓存的 VMAF 质量校准结果。"
+                        },
+                        plan.EffectiveRateControlMode,
+                        settingsSnapshot.EnableAdvancedQualityCalibration,
+                        source.FullPath);
                 }
 
                 if (calibration is { IsAvailable: true })

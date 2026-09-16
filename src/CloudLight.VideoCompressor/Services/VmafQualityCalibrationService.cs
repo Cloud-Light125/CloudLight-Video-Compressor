@@ -335,12 +335,66 @@ public sealed class VmafCalibrationCache
     public void Set(string key, VmafCalibrationResult result) => _entries[key] = result;
 }
 
+public sealed record VmafQualitySearchDecision(bool ShouldRun, string Reason);
+
+/// <summary>
+/// Keeps expensive quality search restricted to Smart mode. Manual bitrate,
+/// target-size and fixed-CRF plans already contain the user's final rate-control
+/// choice and must not launch analysis or sample encodes while building a plan.
+/// </summary>
+public static class VmafQualitySearchPolicy
+{
+    public static VmafQualitySearchDecision Evaluate(AppSettings settings, RateControlMode rateControlMode)
+    {
+        ArgumentNullException.ThrowIfNull(settings);
+
+        return settings.CompressionMode switch
+        {
+            CompressionMode.Bitrate => new(false, "指定视频码率使用用户给定码率，不进行质量搜索。"),
+            CompressionMode.TargetSize => new(false, "指定目标大小只进行大小与码率估算，不进行质量搜索。"),
+            CompressionMode.Crf => new(false, "固定 CRF/CQ/CQP 使用用户给定质量参数，不进行自动质量搜索。"),
+            CompressionMode.SmartAutomatic when !settings.EnableAdvancedQualityCalibration =>
+                new(false, "智能压缩未启用高级质量校准，不进行 VMAF 质量搜索。"),
+            CompressionMode.SmartAutomatic =>
+                new(true, "智能压缩已启用高级质量校准，允许 VMAF 自动质量搜索。"),
+            _ => new(false, $"当前压缩模式 {settings.CompressionMode} 不支持 VMAF 质量搜索（{rateControlMode}）。")
+        };
+    }
+
+    internal static void WriteDiagnostic(
+        VmafQualitySearchDecision decision,
+        RateControlMode rateControlMode,
+        bool smartQualityEnabled,
+        string? sourcePath = null)
+    {
+        var source = string.IsNullOrWhiteSpace(sourcePath)
+            ? string.Empty
+            : $"{Environment.NewLine}Source: {sourcePath}";
+        DiagnosticLog.Write(
+            "VMAF",
+            $"Reason: {decision.Reason}{Environment.NewLine}" +
+            $"RateControlMode: {rateControlMode}{Environment.NewLine}" +
+            $"SmartQualityEnabled: {smartQualityEnabled}{source}");
+    }
+}
+
+public interface IVmafQualityCalibrationService
+{
+    Task<VmafCalibrationResult> CalibrateAsync(
+        VideoFileInfo source,
+        AppSettings settings,
+        VideoEncoder encoder,
+        RateControlMode rateControlMode,
+        FFmpegTools tools,
+        CancellationToken cancellationToken);
+}
+
 /// <summary>
 /// Optional bounded quality search. It samples only representative segments,
 /// never the entire source, and keeps the result in a cache keyed by the
 /// source fingerprint and plan inputs.
 /// </summary>
-public sealed class VmafQualityCalibrationService
+public sealed class VmafQualityCalibrationService : IVmafQualityCalibrationService
 {
     public const int CurrentSamplingSchemaVersion = VmafSampleSelector.SamplingSchemaVersion;
     private static readonly SemaphoreSlim CalibrationGate = new(1, 1);
@@ -358,13 +412,44 @@ public sealed class VmafQualityCalibrationService
         _complexityAnalyzer = complexityAnalyzer ?? new VmafComplexityAnalyzer();
     }
 
-    public async Task<VmafCalibrationResult> CalibrateAsync(
+    /// <summary>
+    /// Compatibility overload for callers that do not already have a plan.
+    /// Plan generation should pass its exact effective rate-control mode to the
+    /// overload below.
+    /// </summary>
+    public Task<VmafCalibrationResult> CalibrateAsync(
         VideoFileInfo source,
         AppSettings settings,
         VideoEncoder encoder,
         FFmpegTools tools,
+        CancellationToken cancellationToken) =>
+        CalibrateAsync(
+            source,
+            settings,
+            encoder,
+            InferRateControlMode(settings.CompressionMode, encoder),
+            tools,
+            cancellationToken);
+
+    public async Task<VmafCalibrationResult> CalibrateAsync(
+        VideoFileInfo source,
+        AppSettings settings,
+        VideoEncoder encoder,
+        RateControlMode rateControlMode,
+        FFmpegTools tools,
         CancellationToken cancellationToken)
     {
+        var qualitySearch = VmafQualitySearchPolicy.Evaluate(settings, rateControlMode);
+        VmafQualitySearchPolicy.WriteDiagnostic(
+            qualitySearch,
+            rateControlMode,
+            settings.EnableAdvancedQualityCalibration,
+            source.FullPath);
+        if (!qualitySearch.ShouldRun)
+        {
+            return VmafCalibrationResult.Unavailable(qualitySearch.Reason);
+        }
+
         await CalibrationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
@@ -535,6 +620,18 @@ public sealed class VmafQualityCalibrationService
         }
         return candidates.OrderBy(value => value).Take(Math.Clamp(count, 3, 5)).ToArray();
     }
+
+    private static RateControlMode InferRateControlMode(CompressionMode mode, VideoEncoder encoder) => mode switch
+    {
+        CompressionMode.Crf when encoder is VideoEncoder.H264Nvenc or VideoEncoder.HevcNvenc or
+                                            VideoEncoder.H264Qsv or VideoEncoder.HevcQsv => RateControlMode.ConstantQuality,
+        CompressionMode.Crf when encoder is VideoEncoder.H264Amf or VideoEncoder.HevcAmf => RateControlMode.ConstantQuantizer,
+        CompressionMode.Crf => RateControlMode.ConstantRateFactor,
+        CompressionMode.TargetSize when encoder is VideoEncoder.Libx264 or VideoEncoder.Libx265 or VideoEncoder.LibsvtAv1 =>
+            RateControlMode.TargetSizeTwoPass,
+        CompressionMode.TargetSize => RateControlMode.VariableBitrate,
+        _ => RateControlMode.AverageBitrate
+    };
 
     private static async Task<bool> EncodeSampleAsync(
         VideoFileInfo source,

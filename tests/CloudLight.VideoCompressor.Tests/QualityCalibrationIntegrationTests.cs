@@ -63,6 +63,8 @@ public sealed class QualityCalibrationIntegrationTests
         var source = await new FFprobeService().ProbeAsync(tools, sourcePath, CancellationToken.None);
         var settings = new AppSettings
         {
+            CompressionMode = CompressionMode.SmartAutomatic,
+            EnableAdvancedQualityCalibration = true,
             CompressionProfile = CompressionProfile.Balanced,
             VmafTarget = 94,
             QualityCalibrationSampleSeconds = 5,
@@ -73,6 +75,7 @@ public sealed class QualityCalibrationIntegrationTests
             source,
             settings,
             VideoEncoder.Libx264,
+            RateControlMode.AverageBitrate,
             tools,
             CancellationToken.None);
 
